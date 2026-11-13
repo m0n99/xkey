@@ -519,17 +519,20 @@ private final class FakeSmartSwitchStore: AppPolicySmartSwitchStore {
 final class SmartSwitchEntryTests: XCTestCase {
 
     private var source: TapEventSource!
+    private var handler: KeyboardEventHandler!
     private var published: [AppContext] = []
 
     override func setUp() {
         super.setUp()
-        source = TapEventSource(handler: KeyboardEventHandler(), isActiveHost: { true })
+        handler = KeyboardEventHandler()
+        source = TapEventSource(handler: handler, isActiveHost: { true })
         source.onAppContext = { [weak self] in self?.published.append($0) }
     }
 
     override func tearDown() {
         source.stop()
         source = nil
+        handler = nil
         let detector = OverlayAppDetector.shared
         detector.axReaderForTesting = nil
         dismissOverlay()
@@ -568,6 +571,46 @@ final class SmartSwitchEntryTests: XCTestCase {
 
         XCTAssertEqual(published.dropFirst().map(\.appliesSmartSwitch).filter { $0 }, [],
                        "a pass must not re-run Smart Switch for an app the user is already in")
+    }
+
+    func testActivationSchedulesRecoveryAfterItsRefinement() {
+        source.recoveryEligibilityForTesting = { true }
+        var scheduledRevision: UInt64?
+        source.onRecoveryScheduledForTesting = { scheduledRevision = $0 }
+        source.start()
+        published.removeAll()
+        source.onAppContext = { [weak self] context in
+            self?.published.append(context)
+            if !context.appliesSmartSwitch {
+                self?.handler.engine.notifyFocusChanged()
+            }
+        }
+
+        postActivation()
+        let activationRevision = handler.typingRevision
+        XCTAssertTrue(handler.engine.cursorMovedSinceReset)
+        waitUntil("activation scheduled recovery") { scheduledRevision != nil }
+
+        XCTAssertEqual(scheduledRevision, handler.typingRevision)
+        XCTAssertGreaterThan(scheduledRevision ?? 0, activationRevision)
+        XCTAssertEqual(published.first?.appliesSmartSwitch, true)
+        XCTAssertTrue(published.dropFirst().allSatisfy { !$0.appliesSmartSwitch })
+    }
+
+    func testTypingAfterActivationCancelsRecoveryButStillRefines() {
+        source.recoveryEligibilityForTesting = { true }
+        var scheduled = false
+        source.onRecoveryScheduledForTesting = { _ in scheduled = true }
+        source.start()
+        published.removeAll()
+
+        postActivation()
+        _ = handler.engine.processKey(character: "v", keyCode: VietnameseData.keyCode(for: "v")!, isUppercase: false)
+        waitUntil("stale activation still refined") { self.published.count >= 2 }
+
+        XCTAssertFalse(scheduled)
+        XCTAssertEqual(published.first?.appliesSmartSwitch, true)
+        XCTAssertFalse(published[1].appliesSmartSwitch)
     }
 
     func testAnInjectionDetectionPassPublishesWhatItRead() {

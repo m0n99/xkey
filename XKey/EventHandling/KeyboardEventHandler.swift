@@ -15,6 +15,17 @@ class KeyboardEventHandler: EventTapManager.EventTapDelegate {
     private let session: InputSession
     private let transport: CGEventTransport
     var engine: VNEngine { session.engine }
+    var typingRevision: UInt64 { engine.typingRevision }
+    var canRecoverCaretWord: Bool {
+        guard AppBehaviorDetector.shared.confirmedInjectionMethod != nil else { return false }
+        return activeInputContext() == true
+    }
+
+    @discardableResult
+    func recoverCaretWord(_ report: CaretWordReport) -> RecoveryOutcome {
+        guard canRecoverCaretWord else { return .notApplicable }
+        return engine.recoverCaretWord(report)
+    }
     private var isVietnameseEnabled = true
     var durableVietnameseEnabled: Bool { isVietnameseEnabled }
     private var appPolicyDecision: AppPolicyDecision = .keepCurrentLanguage

@@ -89,6 +89,12 @@
 		FELAZY0001 /* FocusedElementInfoLazyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FELAZY0002 /* FocusedElementInfoLazyTests.swift */; };
 		WTRES00001 /* WindowTitleResolutionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WTRES00002 /* WindowTitleResolutionTests.swift */; };
 		AXOFFM0001 /* AXPassOffMainThreadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AXOFFM0002 /* AXPassOffMainThreadTests.swift */; };
+		CARETAX002 /* CaretWordAXReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARETAX001 /* CaretWordAXReader.swift */; };
+		CARETAX003 /* CaretWordAXReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARETAX001 /* CaretWordAXReader.swift */; };
+		CARETCO002 /* CaretWordRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARETCO001 /* CaretWordRecovery.swift */; };
+		CARETCO003 /* CaretWordRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARETCO001 /* CaretWordRecovery.swift */; };
+		CARETTT002 /* CaretRecoveryTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARETTT001 /* CaretRecoveryTransportTests.swift */; };
+		CARETET002 /* CaretWordRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARETET001 /* CaretWordRecoveryTests.swift */; };
 		96B1917BFE8E2D474E931323 /* StatusBarPopoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5461DA850B59B52384E81D6 /* StatusBarPopoverView.swift */; };
 		A1000001 /* XKeyApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000001 /* XKeyApp.swift */; };
 		A1000002 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000002 /* AppDelegate.swift */; };
@@ -296,6 +302,10 @@
 		FELAZY0002 /* FocusedElementInfoLazyTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FocusedElementInfoLazyTests.swift; sourceTree = "<group>"; };
 		WTRES00002 /* WindowTitleResolutionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WindowTitleResolutionTests.swift; sourceTree = "<group>"; };
 		AXOFFM0002 /* AXPassOffMainThreadTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AXPassOffMainThreadTests.swift; sourceTree = "<group>"; };
+		CARETAX001 /* CaretWordAXReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaretWordAXReader.swift; sourceTree = "<group>"; };
+		CARETCO001 /* CaretWordRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaretWordRecovery.swift; sourceTree = "<group>"; };
+		CARETTT001 /* CaretRecoveryTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaretRecoveryTransportTests.swift; sourceTree = "<group>"; };
+		CARETET001 /* CaretWordRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaretWordRecoveryTests.swift; sourceTree = "<group>"; };
 		8AE133FC7897416BBCED985C /* FloatingOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingOverlay.swift; sourceTree = "<group>"; };
 		8C93A308BF783CDE94C5E53A /* TempOffToolbarController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TempOffToolbarController.swift; sourceTree = "<group>"; };
 		8EAA0ED7079ABD1980FBFFAE /* SettingsWindowController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SettingsWindowController.swift; sourceTree = "<group>"; };
@@ -508,6 +518,7 @@
 				51300ED94BA488E725A6605B /* DebugLogger.swift */,
 				TAPENV0001 /* TapEnvironment.swift */,
 				TAPSRC0001 /* TapEventSource.swift */,
+				CARETAX001 /* CaretWordAXReader.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -523,6 +534,7 @@
 				INPEVT00001 /* InputEvent.swift */,
 				INPACT00001 /* InputAction.swift */,
 				INPSES00001 /* InputSession.swift */,
+				CARETCO001 /* CaretWordRecovery.swift */,
 				DICTRUNT000 /* DictionaryRuntime.swift */,
 				SETDEB0000 /* SettingsReloadDebouncer.swift */,
 				SECDET001 /* SecureInputDetector.swift */,
@@ -711,6 +723,8 @@
 				FELAZY0002 /* FocusedElementInfoLazyTests.swift */,
 				WTRES00002 /* WindowTitleResolutionTests.swift */,
 				AXOFFM0002 /* AXPassOffMainThreadTests.swift */,
+				CARETTT001 /* CaretRecoveryTransportTests.swift */,
+				CARETET001 /* CaretWordRecoveryTests.swift */,
 				APPPOL00004 /* AppPolicyRuntimeTests.swift */,
 				HOSTCMD0003 /* HostCommandRouterTests.swift */,
 				ARCHTEST0001 /* InputArchitectureTests.swift */,
@@ -918,6 +932,8 @@
 				INPEVT00002 /* InputEvent.swift in Sources */,
 				INPACT00002 /* InputAction.swift in Sources */,
 				INPSES00002 /* InputSession.swift in Sources */,
+				CARETCO002 /* CaretWordRecovery.swift in Sources */,
+				CARETAX002 /* CaretWordAXReader.swift in Sources */,
 				DICTRUNT001 /* DictionaryRuntime.swift in Sources */,
 				SETDEB0001 /* SettingsReloadDebouncer.swift in Sources */,
 				SECDET002 /* SecureInputDetector.swift in Sources */,
@@ -970,6 +986,8 @@
 				INPEVT00003 /* InputEvent.swift in Sources */,
 				INPACT00003 /* InputAction.swift in Sources */,
 				INPSES00003 /* InputSession.swift in Sources */,
+				CARETCO003 /* CaretWordRecovery.swift in Sources */,
+				CARETAX003 /* CaretWordAXReader.swift in Sources */,
 				DICTRUNT002 /* DictionaryRuntime.swift in Sources */,
 				SETDEB0002 /* SettingsReloadDebouncer.swift in Sources */,
 				SECDET003 /* SecureInputDetector.swift in Sources */,
@@ -1087,6 +1105,8 @@
 				FELAZY0001 /* FocusedElementInfoLazyTests.swift in Sources */,
 				WTRES00001 /* WindowTitleResolutionTests.swift in Sources */,
 				AXOFFM0001 /* AXPassOffMainThreadTests.swift in Sources */,
+				CARETTT002 /* CaretRecoveryTransportTests.swift in Sources */,
+				CARETET002 /* CaretWordRecoveryTests.swift in Sources */,
 				APPPOL00005 /* AppPolicyRuntimeTests.swift in Sources */,
 				HOSTCMD0004 /* HostCommandRouterTests.swift in Sources */,
 				ARCHTEST0002 /* InputArchitectureTests.swift in Sources */,

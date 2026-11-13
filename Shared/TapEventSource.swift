@@ -265,6 +265,15 @@ final class TapEventSource {
     /// matches. Not a timestamp: a timestamp cannot prove which snapshot is newer when
     /// the passes overlap.
     private var axPassGeneration: UInt64 = 0
+    private var recoveryEpoch: UInt64 = 0
+
+    var recoveryEligibilityForTesting: (() -> Bool)?
+    var onRecoveryScheduledForTesting: ((UInt64) -> Void)?
+
+    private struct RecoveryTrigger {
+        let revision: UInt64
+        let epoch: UInt64
+    }
 
     /// True from the moment a pass is handed to the queue until its main-thread stage
     /// begins. Main thread only.
@@ -286,6 +295,10 @@ final class TapEventSource {
     private struct PendingAXPass {
         let generation: UInt64
         let element: AXUIElement?
+        let recoveryRevision: UInt64?
+        let recoveryEpoch: UInt64
+        let appPID: pid_t?
+        let appBundleId: String?
         /// Takes the source rather than capturing it, so a queued pass never keeps a
         /// released source alive past its deinit.
         let apply: (TapEventSource, AXSnapshot) -> Void
@@ -294,6 +307,7 @@ final class TapEventSource {
     /// What one AX pass materialised off the main thread, so the stage that applies it
     /// makes no AX call of its own.
     struct AXSnapshot {
+        let generation: UInt64
         /// The focused element's attributes, with every field a detection pass can read
         /// already resolved — see FocusedElementInfo.materialise(bundleId:includingCaret:).
         let focusedInfo: AppBehaviorDetector.FocusedElementInfo
@@ -342,6 +356,7 @@ final class TapEventSource {
             queue: .main
         ) { [weak self] notification in
             guard let self = self else { return }
+            self.recoveryEpoch &+= 1
 
             // Record the new frontmost app for per-keystroke exclusion checks.
             // The bundle ID comes straight from the notification's userInfo — no
@@ -379,6 +394,7 @@ final class TapEventSource {
             // Window Title Rules once it has the title.
             self.publishAppContext(bundleIdentifier: activatedApp?.bundleIdentifier,
                                    appliesSmartSwitch: true)
+            let recoveryTrigger = RecoveryTrigger(revision: self.handler.typingRevision, epoch: self.recoveryEpoch)
 
             // Cancel pending title verifications from previous app
             self.titleVerificationWorkItem?.cancel()
@@ -442,19 +458,24 @@ final class TapEventSource {
                 // Only the detection result lives in the pass: everything a dropped pass
                 // must not take with it is above.
                 self.scheduleAXPass(element: nil) { source, snapshot in
-                    let injectionInfo = source.confirmInjectionMethod(from: snapshot)
-                    source.publishAppContext(
-                        bundleIdentifier: activatedApp?.bundleIdentifier,
-                        snapshot: snapshot,
-                        appliesSmartSwitch: false
-                    )
+                    let fresh = source.applyRecoveryBookkeeping(trigger: recoveryTrigger, snapshot: snapshot) {
+                        let injectionInfo = source.confirmInjectionMethod(from: snapshot)
+                        source.publishAppContext(
+                            bundleIdentifier: activatedApp?.bundleIdentifier,
+                            snapshot: snapshot,
+                            appliesSmartSwitch: false
+                        )
 
-                    // DEBUG: Log window title available at app switch time
-                    let switchWindowTitle = snapshot.focusedInfo.windowTitle ?? "(nil)"
-                    source.onLogEvent?("App switched - engine reset, mid-sentence mode")
-                    source.onLogEvent?("   Window: \(switchWindowTitle)")
-                    let textMethodName = injectionInfo.textSendingMethod == .chunked ? "Chunked" : "OneByOne"
-                    source.onLogEvent?("   Injection: \(injectionInfo.method) (\(injectionInfo.description)) [\(textMethodName)] ✓ confirmed")
+                        // DEBUG: Log window title available at app switch time
+                        let switchWindowTitle = snapshot.focusedInfo.windowTitle ?? "(nil)"
+                        source.onLogEvent?("App switched - engine reset, mid-sentence mode")
+                        source.onLogEvent?("   Window: \(switchWindowTitle)")
+                        let textMethodName = injectionInfo.textSendingMethod == .chunked ? "Chunked" : "OneByOne"
+                        source.onLogEvent?("   Injection: \(injectionInfo.method) (\(injectionInfo.description)) [\(textMethodName)] ✓ confirmed")
+                    }
+                    if let fresh = fresh {
+                        source.scheduleCaretRecovery(freshness: fresh)
+                    }
                 }
             }
 
@@ -559,15 +580,19 @@ final class TapEventSource {
     ///   - element: the element to snapshot, or nil to snapshot whatever is focused when
     ///     the pass runs
     ///   - apply: the main-thread stage
-    private func scheduleAXPass(element: AXUIElement?,
-                                apply: @escaping (TapEventSource, AXSnapshot) -> Void) {
+    private func scheduleAXPass(element: AXUIElement?, recoveryRevision: UInt64? = nil,
+                                 apply: @escaping (TapEventSource, AXSnapshot) -> Void) {
         // Ownership is checked here and again after the hop: a pass costs AX round-trips
         // into the target app, and while another process owns the keystroke path it
         // would only duplicate that process's (Task 9b).
         guard isActiveHost() else { return }
 
         axPassGeneration &+= 1
-        let pass = PendingAXPass(generation: axPassGeneration, element: element, apply: apply)
+        let app = NSWorkspace.shared.frontmostApplication
+        let pass = PendingAXPass(generation: axPassGeneration, element: element,
+                                 recoveryRevision: recoveryRevision, recoveryEpoch: recoveryEpoch,
+                                 appPID: app?.processIdentifier, appBundleId: app?.bundleIdentifier,
+                                 apply: apply)
 
         guard !axPassInFlight else {
             pendingAXPass = pass
@@ -582,9 +607,8 @@ final class TapEventSource {
         // Read on the main thread and carried in, so the queue never touches NSWorkspace:
         // the frontmost app is AppKit state. Pinning it here also ties the window title
         // and the DOM-attribute gate to the app that was frontmost when the pass started.
-        let frontApp = NSWorkspace.shared.frontmostApplication
-        let appElement = frontApp.map { AXUIElementCreateApplication($0.processIdentifier) }
-        let bundleId = frontApp?.bundleIdentifier
+        let appElement = pass.appPID.map { AXUIElementCreateApplication($0) }
+        let bundleId = pass.appBundleId
 
         // Only the overlay probe's AX read moves; its decision half and its apply half
         // stay on this thread, on either side of the hop. nil means no read is needed —
@@ -598,7 +622,19 @@ final class TapEventSource {
         axPassQueue.async { [weak self] in
             let focusedInfo: AppBehaviorDetector.FocusedElementInfo
             let hasFocusedElement: Bool
-            if let element = pass.element ?? AXHelper.getFocusedElement() {
+            let focusedElement: AXUIElement?
+            if pass.recoveryRevision != nil, let appElement = appElement {
+                var value: CFTypeRef?
+                if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &value) == .success,
+                   let value = value, CFGetTypeID(value) == AXUIElementGetTypeID() {
+                    focusedElement = (value as! AXUIElement)
+                } else {
+                    focusedElement = nil
+                }
+            } else {
+                focusedElement = pass.element ?? AXHelper.getFocusedElement()
+            }
+            if let element = focusedElement {
                 focusedInfo = .from(element, appElement: appElement)
                 hasFocusedElement = true
             } else {
@@ -606,6 +642,14 @@ final class TapEventSource {
                 hasFocusedElement = false
             }
             focusedInfo.materialise(bundleId: bundleId, includingCaret: needsCaret)
+            let recoveryReport: CaretWordReport?
+            if let revision = pass.recoveryRevision, let element = focusedElement, let appElement = appElement {
+                recoveryReport = CaretWordAXReader.read(CaretWordAXReader.provider(element: element, appElement: appElement),
+                                                        signature: focusedInfo.signature, bundleId: bundleId,
+                                                        revision: revision)
+            } else {
+                recoveryReport = nil
+            }
             let probedOverlayName = probe == nil ? nil : OverlayAppDetector.shared.readOverlayNameViaAX()
 
             DispatchQueue.main.async {
@@ -649,9 +693,21 @@ final class TapEventSource {
                 // Ownership can flip while a pass is in flight.
                 guard self.isActiveHost() else { return }
 
-                pass.apply(self, AXSnapshot(focusedInfo: focusedInfo,
-                                            hasFocusedElement: hasFocusedElement,
-                                            overlayName: OverlayAppDetector.shared.lastKnownOverlayName))
+                let snapshot = AXSnapshot(generation: pass.generation, focusedInfo: focusedInfo,
+                                          hasFocusedElement: hasFocusedElement,
+                                          overlayName: OverlayAppDetector.shared.lastKnownOverlayName)
+                pass.apply(self, snapshot)
+                let expected = CaretRecoveryFreshness(revision: pass.recoveryRevision ?? 0,
+                                                      epoch: pass.recoveryEpoch, generation: pass.generation,
+                                                      isRunning: true, isActiveHost: true)
+                let frontApp = NSWorkspace.shared.frontmostApplication
+                // Observer signatures may describe autocomplete, not the app's focused editor.
+                CaretRecoveryFreshness.applyIfCurrent(report: recoveryReport, expected: expected,
+                    current: self.recoveryFreshness, expectedPID: pass.appPID,
+                    currentPID: frontApp?.processIdentifier, expectedBundleId: pass.appBundleId,
+                    currentBundleId: frontApp?.bundleIdentifier) {
+                    _ = self.handler.recoverCaretWord($0)
+                }
             }
         }
     }
@@ -689,6 +745,10 @@ final class TapEventSource {
     /// both processors from it, so the focused element and its attributes are read once,
     /// off the main thread.
     func handleFocusCheck() {
+        handleFocusCheck(recoveryTrigger: nil)
+    }
+
+    private func handleFocusCheck(recoveryTrigger: RecoveryTrigger?) {
         // Skip the whole AX pass while another process owns the keystroke path
         // (Task 9b). Gating the function covers all of its callers — the mouse-click
         // monitor and AppDelegate's forwarder.
@@ -716,8 +776,41 @@ final class TapEventSource {
         // The focused element and its attributes are read on axPassQueue; applyFocusCheck
         // takes it from there.
         scheduleAXPass(element: nil) { source, snapshot in
-            source.applyFocusCheck(snapshot)
+            guard let trigger = recoveryTrigger else {
+                source.applyFocusCheck(snapshot)
+                return
+            }
+            let fresh = source.applyRecoveryBookkeeping(trigger: trigger, snapshot: snapshot) {
+                source.applyFocusCheck(snapshot)
+            }
+            if let fresh = fresh {
+                source.scheduleCaretRecovery(freshness: fresh)
+            }
         }
+    }
+
+    private var recoveryFreshness: CaretRecoveryFreshness {
+        CaretRecoveryFreshness(revision: handler.typingRevision, epoch: recoveryEpoch,
+                               generation: axPassGeneration, isRunning: isRunning,
+                               isActiveHost: isActiveHost())
+    }
+
+    private func applyRecoveryBookkeeping(trigger: RecoveryTrigger, snapshot: AXSnapshot,
+                                          bookkeeping: () -> Void) -> CaretRecoveryFreshness? {
+        let expected = CaretRecoveryFreshness(revision: trigger.revision, epoch: trigger.epoch,
+                                              generation: snapshot.generation, isRunning: true,
+                                              isActiveHost: true)
+        return CaretRecoveryFreshness.afterBookkeeping(expected: expected,
+                                                      current: { self.recoveryFreshness },
+                                                      bookkeeping: bookkeeping)
+    }
+
+    private func scheduleCaretRecovery(freshness: CaretRecoveryFreshness) {
+        guard freshness.matches(recoveryFreshness),
+              pendingAXPass == nil, !axPassInFlight,
+              (recoveryEligibilityForTesting?() ?? handler.canRecoverCaretWord) else { return }
+        scheduleAXPass(element: nil, recoveryRevision: freshness.revision) { _, _ in }
+        onRecoveryScheduledForTesting?(freshness.revision)
     }
 
     /// Main-thread stage of the focus check.
@@ -916,7 +1009,12 @@ final class TapEventSource {
     /// to catch same-app context switches (tab/window) where signature stays the same
     /// but window title rules and injection method may change.
     func handleAXFocusChanged(_ element: AXUIElement) {
-        guard isActiveHost() else {
+        let activeHost = isActiveHost()
+        let accepted = CaretRecoveryFreshness.acceptFocusNotification(
+            epoch: &recoveryEpoch, isActiveHost: activeHost,
+            elapsed: CFAbsoluteTimeGetCurrent() - lastAXFocusChangeTime,
+            throttleInterval: axFocusChangeThrottleInterval)
+        guard activeHost else {
             // Ownership flipped while this observer was live. Tear it down here rather
             // than waiting for an app switch that may never come — otherwise every focus
             // and title change keeps running a full AX pass from a process whose tap is
@@ -933,13 +1031,17 @@ final class TapEventSource {
         // the last re-detection that actually landed, not from the last read that ran.
         // Bursts arriving while a pass is in flight are coalesced by scheduleAXPass
         // instead.
-        let now = CFAbsoluteTimeGetCurrent()
-        guard now - lastAXFocusChangeTime > axFocusChangeThrottleInterval else {
-            return
-        }
+        guard accepted else { return }
 
+        let trigger = RecoveryTrigger(revision: handler.typingRevision, epoch: recoveryEpoch)
         scheduleAXPass(element: element) { source, snapshot in
-            source.applyAXFocusChange(element: element, snapshot: snapshot)
+            let previousSignature = source.lastFocusedElementSignature
+            let fresh = source.applyRecoveryBookkeeping(trigger: trigger, snapshot: snapshot) {
+                source.applyAXFocusChange(element: element, snapshot: snapshot)
+            }
+            let signature = snapshot.focusedInfo.signature
+            guard let fresh = fresh, !previousSignature.isEmpty, previousSignature != signature else { return }
+            source.scheduleCaretRecovery(freshness: fresh)
         }
     }
 
@@ -1130,6 +1232,8 @@ final class TapEventSource {
             // Reset engine when mouse is released (click completed or drag finished)
             // Mark as cursor moved to disable autocomplete fix (avoid deleting text on right)
             self?.handler.resetWithCursorMoved()
+            self?.recoveryEpoch &+= 1
+            let trigger = self.map { RecoveryTrigger(revision: $0.handler.typingRevision, epoch: $0.recoveryEpoch) }
 
             // Log detailed input detection info (ONLY when debug window is visible)
             // This avoids expensive AX calls during normal usage
@@ -1147,7 +1251,8 @@ final class TapEventSource {
 
             // Trigger toolbar check with slight delay to allow focus to settle
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                self?.handleFocusCheck()
+                guard let self = self else { return }
+                self.handleFocusCheck(recoveryTrigger: trigger)
             }
         }
     }

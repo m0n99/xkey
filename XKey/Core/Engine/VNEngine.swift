@@ -184,6 +184,7 @@ class VNEngine {
     /// This prevents incorrect restore when engine doesn't have full context (e.g., user
     /// clicked mid-word and continued typing, or backspaced across word boundary).
     var bufferDesyncDetected = false
+    private(set) var typingRevision: UInt64 = 0
 
     
     // MARK: - Logging
@@ -234,6 +235,7 @@ class VNEngine {
     ///   - hasOtherModifier: Whether Ctrl/Cmd/Option is pressed
     /// - Returns: HookState with processing result
     func handleKeyEvent(keyCode: UInt16, character: Character, isUppercase: Bool, hasOtherModifier: Bool) -> HookState {
+        typingRevision &+= 1
         // Debug: Log Space key
         if keyCode == VietnameseData.KEY_SPACE {
             logCallback?("SPACE KEY RECEIVED: keyCode=\(keyCode), index=\(index)")
@@ -393,6 +395,7 @@ class VNEngine {
 
     /// Handle delete/backspace key
     private func handleDelete() {
+        typingRevision &+= 1
         let currentWord = !buffer.isEmpty ? getCurrentWord() : "(empty)"
         logCallback?("handleDelete: count=\(buffer.count), spaceCount=\(spaceCount), specialChar=\(specialChar.count), word='\(currentWord)'")
 
@@ -2963,6 +2966,7 @@ class VNEngine {
 
     /// Restore last word from history
     func restoreLastTypingState() {
+        typingRevision &+= 1
         logCallback?("restoreLastTypingState: history.count=\(history.count)")
 
         guard let lastSnapshot = history.popLast() else {
@@ -2998,6 +3002,8 @@ class VNEngine {
 
     /// Start a new typing session
     func startNewSession() {
+        typingRevision &+= 1
+        focusChangedDuringTyping = false
         let prevWord = !buffer.isEmpty ? getCurrentWord() : ""
         let prevCount = buffer.count
 
@@ -3129,6 +3135,7 @@ class VNEngine {
     
     /// Reset engine to initial state
     func reset() {
+        typingRevision &+= 1
         startNewSession()
         history.clear()
         specialChar.removeAll()
@@ -3154,6 +3161,7 @@ class VNEngine {
     /// where the user is now typing — otherwise the next character at the new
     /// location would silently capitalize (e.g. after paste + click + delete).
     func resetWithCursorMoved() {
+        typingRevision &+= 1
         reset()
         cursorMovedSinceReset = true
         upperCaseStatus = 0
@@ -3163,6 +3171,7 @@ class VNEngine {
     /// Clear history (for terminal apps after Enter key)
     /// This prevents backspace from restoring words from previous command lines
     func clearHistory() {
+        typingRevision &+= 1
         history.clear()
         logCallback?("clearHistory: history cleared for terminal")
     }
@@ -3201,11 +3210,48 @@ class VNEngine {
     /// This can happen when suggestion popups appear - keystrokes may go to popup
     /// causing buffer desync. Restore will be skipped at next word break/backspace.
     func notifyFocusChanged() {
+        typingRevision &+= 1
         // Only set flag if we're currently typing (have content in buffer)
         if !buffer.isEmpty {
             focusChangedDuringTyping = true
             logCallback?("notifyFocusChanged: focus changed during typing, will skip restore")
         }
+    }
+
+    /// Apply only a bounded, collapsed-selection observation from the current revision.
+    func recoverCaretWord(_ report: CaretWordReport) -> RecoveryOutcome {
+        guard report.expectedRevision == typingRevision else { return .rejected(.staleRevision) }
+        guard report.selectionAnchoredAtCaret && report.selectionLength == 0 else {
+            return .rejected(.selectionNotAnchored)
+        }
+        guard report.caretAtWordEnd else { return .rejected(.midWordCaret) }
+        guard vCodeTable == 0 else { return .notApplicable }
+        guard report.word.unicodeScalars.elementsEqual(report.word.precomposedStringWithCanonicalMapping.unicodeScalars),
+              let parsed = CaretWordParser.parse(leftContext: report.word, rightContext: "",
+                  leftContextStartsAtFieldStart: true, rightContextEndsAtFieldEnd: true),
+              parsed.word.unicodeScalars.elementsEqual(report.word.unicodeScalars) else {
+            return .rejected(.wordMismatch)
+        }
+        if !buffer.isEmpty || buffer.hasOverflow {
+            guard !buffer.hasOverflow, getCurrentWord().unicodeScalars.elementsEqual(report.word.unicodeScalars) else {
+                return .rejected(.engineHasPartialWord)
+            }
+            cursorMovedSinceReset = false
+            focusChangedDuringTyping = false
+            typingRevision &+= 1
+            return .validated
+        }
+        guard report.word.isEmpty else { return .rejected(.wordMismatch) }
+        guard history.count > 0 || !specialChar.isEmpty || spaceCount > 0 ||
+                cursorMovedSinceReset || focusChangedDuringTyping else { return .notApplicable }
+        // A proven empty boundary cannot validate old history; discard it before resuming.
+        history.clear()
+        specialChar.removeAll()
+        spaceCount = 0
+        cursorMovedSinceReset = false
+        focusChangedDuringTyping = false
+        typingRevision &+= 1
+        return .validated
     }
 
 
@@ -3324,6 +3370,7 @@ extension VNEngine {
     /// Undo Vietnamese typing - restore original keystrokes in actual typing order
     /// Example: "manager" typed as m-a-n-a-g-e-r → engine shows "mângẻ" → undo restores "manager"
     func undoTyping() -> ProcessResult {
+        typingRevision &+= 1
         logCallback?("undoTyping: index=\(index), stateIndex=\(stateIndex)")
 
         guard index > 0 && stateIndex > 0 else {
@@ -3390,6 +3437,7 @@ extension VNEngine {
     /// Process word break (space, punctuation, etc.)
     /// Returns ProcessResult with macro replacement if found
     func processWordBreak(character: Character) -> ProcessResult {
+        typingRevision &+= 1
         // Ensure upperCaseStatus is always updated regardless of which return path is taken.
         // This centralizes the invariant: every processWordBreak call must update the status,
         // whether it returns early via macro replacement, spell-check restore, or the normal end.
