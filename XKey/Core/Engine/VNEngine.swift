@@ -160,6 +160,7 @@ class VNEngine {
     // MARK: - Engine State
 
     var tempDisableKey = false
+    private var literalUntilWordBreak = false
     var spaceCount = 0
     var hasHandledMacro = false
     var upperCaseStatus: UInt8 = 0
@@ -396,6 +397,7 @@ class VNEngine {
     /// Handle delete/backspace key
     private func handleDelete() {
         typingRevision &+= 1
+        literalUntilWordBreak = false
         let currentWord = !buffer.isEmpty ? getCurrentWord() : "(empty)"
         logCallback?("handleDelete: count=\(buffer.count), spaceCount=\(spaceCount), specialChar=\(specialChar.count), word='\(currentWord)'")
 
@@ -545,6 +547,8 @@ class VNEngine {
         // it should be added in the specific handlers (insertAOE, insertD, handleMarkKey)
         // ONLY when a key actually modifies an existing entry.
         
+        let visibleCount = buffer.count
+        let visibleWord = vUseMacro == 1 ? (0..<visibleCount).map { typingWord[$0] } : []
         let isSpecial = isSpecialKey(keyCode: keyCode)
         
         // Bracket keys [/] are EXPLICIT Vietnamese standalone input (ơ/ư).
@@ -554,9 +558,12 @@ class VNEngine {
         // 3. checkForStandaloneChar already validates the context
         let isBracketStandaloneKey = (keyCode == VietnameseData.KEY_LEFT_BRACKET || keyCode == VietnameseData.KEY_RIGHT_BRACKET)
         
-        if !isSpecial || (tempDisableKey && !isBracketStandaloneKey) {
-            if vQuickTelex == 1 && isQuickTelexKey(keyCode: keyCode) {
+        if literalUntilWordBreak || !isSpecial || (tempDisableKey && !isBracketStandaloneKey) {
+            if !literalUntilWordBreak && vQuickTelex == 1 && isQuickTelexKey(keyCode: keyCode) {
                 handleQuickTelex(keyCode: keyCode, isCaps: isCaps)
+                restoreInvalidComposition(
+                    visibleCount: visibleCount, visibleWord: visibleWord, keyCode: keyCode, isCaps: isCaps
+                )
                 return
             } else {
                 hookState.code = UInt8(vDoNothing)
@@ -576,11 +583,15 @@ class VNEngine {
             hookState.extCode = 3
             handleMainKey(keyCode: keyCode, isCaps: isCaps)
         }
+
+        restoreInvalidComposition(
+            visibleCount: visibleCount, visibleWord: visibleWord, keyCode: keyCode, isCaps: isCaps
+        )
         
         // Always check for vowel auto-fix (ưo → ươ)
         // This is important for correct Vietnamese typing
         // Skip if instant restore has occurred (extCode == 5) - word is being discarded
-        if !isKeyD(keyCode: keyCode, inputType: vInputType) && hookState.extCode != 5 {
+        if !literalUntilWordBreak && !isKeyD(keyCode: keyCode, inputType: vInputType) && hookState.extCode != 5 {
             let deltaBS = hookState.code == UInt8(vDoNothing) ? -1 : 0
             checkVowelAutoFix(deltaBackSpace: deltaBS)
         }
@@ -591,7 +602,7 @@ class VNEngine {
         // Additional rule: when adding vowels after a mark, position may need adjustment
         // Example: "ngò" + "a" → "ngoà" (mark moves from 'o' to 'a')
         // Skip if instant restore has occurred (extCode == 5) - word is being discarded
-        if !isKeyD(keyCode: keyCode, inputType: vInputType) && hookState.extCode != 5 {
+        if !literalUntilWordBreak && !isKeyD(keyCode: keyCode, inputType: vInputType) && hookState.extCode != 5 {
             // Check if this key is an end consonant
             let isEndConsonant = vietnameseData.isConsonant(keyCode) && index > 1
             
@@ -642,7 +653,8 @@ class VNEngine {
         if vUseMacro == 1 {
             if hookState.code == UInt8(vDoNothing) {
                 hookState.macroKey.append(UInt32(keyCode) | (isCaps ? VNEngine.CAPS_MASK : 0))
-            } else if hookState.code == UInt8(vWillProcess) || hookState.code == UInt8(vRestore) {
+            } else if !(hookState.extCode == 5 && literalUntilWordBreak) &&
+                (hookState.code == UInt8(vWillProcess) || hookState.code == UInt8(vRestore)) {
                 for _ in 0..<hookState.backspaceCount {
                     if !hookState.macroKey.isEmpty {
                         hookState.macroKey.removeLast()
@@ -678,7 +690,8 @@ class VNEngine {
 
         
         // Handle bracket keys
-        if isBracketKey(keyCode: keyCode) && (isBracketKey(hookState.charData[0]) || vInputType == 2 || vInputType == 3) {
+        if !literalUntilWordBreak && isBracketKey(keyCode: keyCode) &&
+            (isBracketKey(hookState.charData[0]) || vInputType == 2 || vInputType == 3) {
             let effectiveCount = buffer.count - (hookState.code == UInt8(vWillProcess) ? hookState.backspaceCount : 0)
             if effectiveCount > 0 {
                 buffer.removeLast()
@@ -690,6 +703,75 @@ class VNEngine {
             specialChar.append(UInt32(keyCode) | (isCaps ? VNEngine.CAPS_MASK : 0))
         }
     }
+
+    private func restoreInvalidComposition(visibleCount: Int, visibleWord: [UInt32], keyCode: UInt16, isCaps: Bool) {
+        if let log = logCallback { logInstantRestoreVeto(visibleCount: visibleCount, log: log) }
+        let isAppend = hookState.code == UInt8(vDoNothing) && buffer.count == visibleCount + 1
+        let isTransformation = hookState.code == UInt8(vWillProcess) &&
+            (buffer.count == visibleCount || buffer.count == visibleCount + 1)
+        guard !literalUntilWordBreak, isAppend || isTransformation,
+              SharedSettings.shared.spellCheckEnabled,
+              SharedSettings.shared.restoreIfWrongSpelling,
+              SharedSettings.shared.instantRestoreOnWrongSpelling,
+              vCheckSpelling == 1, vRestoreIfWrongSpelling == 1,
+              vTempOffEngine == 0, vTempOffSpelling == 0,
+              !cursorMovedSinceReset, !focusChangedDuringTyping, !bufferDesyncDetected,
+              !buffer.hasOverflow else { return }
+
+        if isTransformation { checkSpelling() }
+        guard !spellingOK || !spellingVowelOK, hasVietnameseProcessing() else { return }
+
+        let rawCount = buffer.keystrokeSequenceCount
+        guard rawCount > 0, rawCount <= TypingBuffer.MAX_SIZE,
+              rawCount <= hookState.charData.count, rawCount == buffer.totalKeystrokeCount else {
+            logCallback?("Instant restore veto: rawCount=\(rawCount) max=\(TypingBuffer.MAX_SIZE) " +
+                         "capacity=\(hookState.charData.count) total=\(buffer.totalKeystrokeCount)")
+            return
+        }
+        let raw = buffer.getKeystrokeSequence()
+        guard let last = raw.last, last.keyCode == keyCode, last.isCaps == isCaps else {
+            logCallback?("Instant restore veto: current key missing from raw history")
+            return
+        }
+
+        if vUseMacro == 1 {
+            if hookState.macroKey.count >= visibleCount &&
+                hookState.macroKey.suffix(visibleCount).elementsEqual(visibleWord) {
+                hookState.macroKey.removeLast(visibleCount)
+                hookState.macroKey.append(contentsOf: raw.map {
+                    UInt32($0.keyCode) | ($0.isCaps ? VNEngine.CAPS_MASK : 0)
+                })
+            } else if let key = raw.last {
+                hookState.macroKey.append(UInt32(key.keyCode) | (key.isCaps ? VNEngine.CAPS_MASK : 0))
+            }
+        }
+        buffer.clear()
+        for (offset, key) in raw.enumerated() {
+            buffer.append(keyCode: key.keyCode, isCaps: key.isCaps)
+            buffer.recordKeystroke(RawKeystroke(keyCode: key.keyCode, isCaps: key.isCaps))
+            hookState.charData[raw.count - 1 - offset] =
+                UInt32(key.keyCode) | (key.isCaps ? VNEngine.CAPS_MASK : 0)
+        }
+        hookState.code = UInt8(vRestore)
+        hookState.backspaceCount = visibleCount
+        hookState.newCharCount = raw.count
+        hookState.extCode = 5
+        literalUntilWordBreak = true
+    }
+
+    private func logInstantRestoreVeto(visibleCount: Int, log: (String) -> Void) {
+        if !literalUntilWordBreak, hookState.code == UInt8(vDoNothing),
+           buffer.count == visibleCount + 1, SharedSettings.shared.spellCheckEnabled,
+           SharedSettings.shared.restoreIfWrongSpelling, SharedSettings.shared.instantRestoreOnWrongSpelling,
+           vCheckSpelling == 1, vRestoreIfWrongSpelling == 1, vTempOffEngine == 0, vTempOffSpelling == 0,
+           !spellingOK || !spellingVowelOK,
+           cursorMovedSinceReset || focusChangedDuringTyping || bufferDesyncDetected || buffer.hasOverflow,
+           hasVietnameseProcessing() {
+            log("Instant restore veto: cursorMovedSinceReset=\(cursorMovedSinceReset) " +
+                "focusChangedDuringTyping=\(focusChangedDuringTyping) " +
+                "bufferDesync=\(bufferDesyncDetected) overflow=\(buffer.hasOverflow)")
+        }
+    }
     
     // MARK: - Main Key Processing
     
@@ -699,6 +781,8 @@ class VNEngine {
             removeMark()
             if !isChanged {
                 insertKey(keyCode: keyCode, isCaps: isCaps)
+            } else {
+                insertStateAt(index: vowelStartIndex, keyCode: keyCode, isCaps: isCaps)
             }
             return
         }
@@ -1911,6 +1995,18 @@ class VNEngine {
         }
     }
 
+    private func spellingVowel(at index: Int) -> VNVowel? {
+        let data = typingWord[index]
+        let key = UInt16(data & VNEngine.CHAR_MASK)
+        let shape = data & (VNEngine.TONE_MASK | VNEngine.TONEW_MASK)
+        if shape == (VNEngine.TONE_MASK | VNEngine.TONEW_MASK) { return nil }
+        if shape == VNEngine.TONE_MASK && key != VietnameseData.KEY_A &&
+            key != VietnameseData.KEY_E && key != VietnameseData.KEY_O { return nil }
+        if shape == VNEngine.TONEW_MASK && key != VietnameseData.KEY_A &&
+            key != VietnameseData.KEY_O && key != VietnameseData.KEY_U { return nil }
+        return convertToVNVowel(at: index)
+    }
+
     /// Get vowel sequence from current vowelStartIndex to vowelEndIndex
     /// Returns array of VNVowel or empty array if conversion fails
     private func getCurrentVowelSequence() -> [VNVowel] {
@@ -2099,14 +2195,12 @@ class VNEngine {
             // Has vowel, now check end consonant
             spellingVowelOK = false
             
-            // Check vowel combination if forceCheckVowel
-            if k - j > 1 && forceCheckVowel {
-                // Complex vowel check (similar to OpenKey's vowel combine check)
-                // For now, we assume vowel is OK
-                spellingVowelOK = true
-            } else if !vietnameseData.isConsonant(chr(j)) {
-                spellingVowelOK = true
-            }
+            // Unknown packed characters remain possible rather than triggering restore.
+            let vowels = (j..<k).compactMap { spellingVowel(at: $0) }
+            spellingVowelOK = vowels.count != k - j ||
+                VowelSequenceValidator.rimeStatus(
+                    for: vowels, hasConsonantSuffix: k < Int(spellingEndIndex)
+                ) != .impossible
             
             // Continue check last consonant
             for endPattern in vietnameseData.endConsonantTable {
@@ -2535,86 +2629,6 @@ class VNEngine {
         hookState.newCharCount = hookState.backspaceCount
         logCallback?("  Result: backspaceCount=\(hookState.backspaceCount), newCharCount=\(hookState.newCharCount)")
 
-        // Dictionary check after adding mark - ONLY for instant restore feature
-        // When instant restore is OFF, we should NOT block typing here
-        // because the word is still being typed (e.g., "vịe" is incomplete, will become "việt")
-        // Dictionary validation will happen when user presses Space
-        // Hierarchy: instantRestore requires restoreIfWrongSpelling requires spellCheckEnabled
-        //
-        // IMPORTANT: Only check when ADDING a new mark, not when REMOVING (duplicate/undo)
-        // When user presses same mark key twice (e.g., 'ỏ' + 'r' → 'o'), this is normal restore
-        // and should not trigger instant restore. Check by seeing if hookState.code is NOT vRestore.
-        let isDuplicateMark = (hookState.code == UInt8(vRestore))
-        
-        if !isDuplicateMark &&
-           SharedSettings.shared.spellCheckEnabled && 
-           SharedSettings.shared.restoreIfWrongSpelling &&
-           SharedSettings.shared.instantRestoreOnWrongSpelling &&
-           canModifyFlag {
-            let style: VNDictionaryManager.DictionaryStyle = SharedSettings.shared.modernStyle ? .dauMoi : .dauCu
-            if VNDictionaryManager.shared.isDictionaryLoaded(style: style) {
-                let wordWithMark = getCurrentWord()
-                let isValid = isCurrentWordValid()
-                logCallback?("  → Dictionary check after mark (instant restore): word='\(wordWithMark)', valid=\(isValid)")
-
-                // If word with mark is invalid and instant restore is enabled
-                if !isValid {
-                    // IMPORTANT: Only instant restore if the raw keystrokes look like English
-                    // This prevents incomplete Vietnamese words like "tiê" from being restored to "tiee"
-                    // Vietnamese words in progress should NOT be instantly restored
-                    
-                    // Get raw input for English pattern detection
-                    // Use hasEnglishStartPattern which only checks beginning/middle of word
-                    // This avoids false positives from Telex mark keys (s/f/r/x/j) at the end
-                    // NOTE: Use getRawInputStringForEnglishDetection() which EXCLUDES overflow
-                    let rawInput = getRawInputStringForEnglishDetection()
-                    let isEnglishPattern = rawInput.hasEnglishStartPattern
-                    
-                    logCallback?("  → Word invalid, checking if English: rawInput='\(rawInput)', isEnglish=\(isEnglishPattern)")
-                    
-                    if isEnglishPattern {
-                        logCallback?("  → Detected English pattern, INSTANT RESTORE enabled - restoring now!")
-                        
-                        // Perform immediate restore - restore to original keystrokes
-                        var originalWord = [UInt32]()
-                        for i in 0..<Int(stateIndex) {
-                            originalWord.append(keyStates[i])
-                        }
-                        
-                        if !originalWord.isEmpty {
-                            hookState.code = UInt8(vRestore)
-                            hookState.backspaceCount = Int(index)
-                            hookState.newCharCount = originalWord.count
-                            
-                            // Set original characters to send
-                            for i in 0..<originalWord.count {
-                                let keyData = originalWord[i]
-                                let keyCode = UInt16(keyData & VNEngine.CHAR_MASK)
-                                let isCaps = (keyData & VNEngine.CAPS_MASK) != 0
-                                
-                                var charCode = UInt32(keyCode)
-                                if isCaps {
-                                    charCode |= VNEngine.CAPS_MASK
-                                }
-                                hookState.charData[originalWord.count - 1 - i] = charCode
-                            }
-                            
-                            // Mark as instant restore (extCode = 5) so handleNormalKey won't insert key again
-                            hookState.extCode = 5
-                            logCallback?("  → Instant restore: bs=\(hookState.backspaceCount), chars=\(hookState.newCharCount), extCode=5")
-                            
-                            // Reset engine after instant restore
-                            buffer.clear()
-                        }
-                        
-                        // Set tempDisableKey so subsequent keys don't get processed as Vietnamese
-                        tempDisableKey = true
-                    } else {
-                        logCallback?("  → Not detected as English, skipping instant restore (allow Vietnamese typing to continue)")
-                    }
-                }
-            }
-        }
     }
     
     // MARK: - Mark Position Rules (Modern Orthography)
@@ -2927,7 +2941,8 @@ class VNEngine {
     /// Save current word to history for restore functionality
     /// Save current word to history
     func saveWord() {
-        if hookState.code == UInt8(vReplaceMacro) || hookState.code == UInt8(vRestore) {
+        if hookState.code == UInt8(vReplaceMacro) ||
+            (hookState.code == UInt8(vRestore) && !literalUntilWordBreak) {
             logCallback?("saveWord: Skipping (macro or restore)")
             return
         }
@@ -3003,6 +3018,7 @@ class VNEngine {
     /// Start a new typing session
     func startNewSession() {
         typingRevision &+= 1
+        literalUntilWordBreak = false
         focusChangedDuringTyping = false
         let prevWord = !buffer.isEmpty ? getCurrentWord() : ""
         let prevCount = buffer.count
@@ -3747,6 +3763,7 @@ extension VNEngine {
 
             // Reset buffer but preserve macroKey
             buffer.clear()
+            literalUntilWordBreak = false
             hookState.backspaceCount = 0
             hookState.newCharCount = 0
             tempDisableKey = false

@@ -9,6 +9,10 @@ import Foundation
 
 struct VowelSequenceValidator {
 
+    enum RimeStatus {
+        case valid, incomplete, impossible
+    }
+
     // MARK: - Vowel Sequence Properties
 
     /// Vowel sequences that are "complete" (can accept tone without ending consonant)
@@ -179,6 +183,48 @@ struct VowelSequenceValidator {
     ]
     
     // MARK: - Validation
+
+    private static func baseVowel(_ vowel: VNVowel) -> VNVowel {
+        switch vowel {
+        case .aCircumflex, .aBreve: return .a
+        case .eCircumflex: return .e
+        case .oCircumflex, .oHorn: return .o
+        case .uHorn: return .u
+        default: return vowel
+        }
+    }
+
+    private static func shapePatterns(_ sequences: Set<[VNVowel]>, includePrefixes: Bool) -> Set<[VNVowel]> {
+        var patterns = Set<[VNVowel]>()
+        for sequence in sequences {
+            for mask in 0..<(1 << sequence.count) {
+                let pattern = sequence.enumerated().map { index, vowel in
+                    mask & (1 << index) == 0 ? vowel : baseVowel(vowel)
+                }
+                patterns.insert(pattern)
+                if includePrefixes && pattern.count > 1 {
+                    for length in 1..<pattern.count {
+                        patterns.insert(Array(pattern.prefix(length)))
+                    }
+                }
+            }
+        }
+        return patterns
+    }
+
+    private static let openRimePatterns = shapePatterns(validSequences, includePrefixes: true)
+    private static let codaRimePatterns = shapePatterns(sequencesWithConsonantSuffix, includePrefixes: false)
+
+    static func rimeStatus(for vowels: [VNVowel], hasConsonantSuffix: Bool) -> RimeStatus {
+        guard !vowels.isEmpty, vowels.count <= 3 else { return .impossible }
+        if vowels.count == 1 { return .valid }
+        let patterns = hasConsonantSuffix ? codaRimePatterns : openRimePatterns
+        guard patterns.contains(vowels) else { return .impossible }
+        if validSequences.contains(vowels) && !incompleteSequences.contains(vowels) {
+            return .valid
+        }
+        return .incomplete
+    }
     
     static func isValid(_ sequence: VowelSequence) -> Bool {
         return validSequences.contains(sequence.vowels)

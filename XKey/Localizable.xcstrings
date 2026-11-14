@@ -1828,18 +1828,18 @@
         }
       }
     },
-    "Cần xác nhận và tải về bộ từ điển Tiếng Việt bên dưới": {
+    "Từ điển hỗ trợ kiểm tra chính tả khi kết thúc từ.": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Please confirm and download the Vietnamese dictionary below"
+            "value": "The dictionary supports spelling checks at word boundaries."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请确认并下载下方的越南语词典"
+            "value": "词典用于辅助词语结束时的拼写检查。"
           }
         }
       }
@@ -4886,18 +4886,18 @@
         }
       }
     },
-    "Nếu bật: Restore ngay khi thêm dấu không hợp lệ, có thể sẽ gây lỗi từ Tiếng Việt hợp lệ không mong muốn. Nếu tắt: Chờ nhấn Space để restore sẽ chính xác hơn.": {
+    "Khôi phục ngay khi cấu trúc từ không còn hợp lệ trong tiếng Việt. Tắt để chờ dấu cách hoặc dấu ngắt từ.": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "If enabled: Restore immediately when invalid diacritics are added, may cause unwanted changes to valid Vietnamese words. If disabled: Wait for Space key to restore for better accuracy."
+            "value": "Restore immediately when the word structure can no longer form valid Vietnamese. Turn off to wait for a space or another word boundary."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "启用时：添加无效声调标记时立即恢复，可能导致有效越南语单词的意外更改。禁用时：等待空格键后恢复，准确度更高。"
+            "value": "当输入不再符合越南语音节结构时立即还原。关闭后，等待空格或其他词语分隔符再还原。"
           }
         }
       }

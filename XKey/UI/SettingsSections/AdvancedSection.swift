@@ -67,7 +67,7 @@ struct AdvancedSection: View {
                                 }
                             }
                         
-                        Text("Cần xác nhận và tải về bộ từ điển Tiếng Việt bên dưới")
+                        Text("Từ điển hỗ trợ kiểm tra chính tả khi kết thúc từ.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                             .padding(.leading, 20)
@@ -89,7 +89,10 @@ struct AdvancedSection: View {
                                         Toggle("Khôi phục ngay lập tức", isOn: $viewModel.preferences.instantRestoreOnWrongSpelling)
                                             .padding(.leading, 40)
                                         
-                                        Text("Nếu bật: Restore ngay khi thêm dấu không hợp lệ, có thể sẽ gây lỗi từ Tiếng Việt hợp lệ không mong muốn. Nếu tắt: Chờ nhấn Space để restore sẽ chính xác hơn.")
+                                        Text("""
+                                            Khôi phục ngay khi cấu trúc từ không còn hợp lệ trong tiếng Việt. \
+                                            Tắt để chờ dấu cách hoặc dấu ngắt từ.
+                                            """)
                                             .font(.caption)
                                             .foregroundColor(.secondary)
                                             .padding(.leading, 40)
