@@ -34,6 +34,74 @@ func runRecoveryRetryScenarios() {
           "revision without pinned PID is not retryable")
     check(applications == 1, "no rejected report invokes apply")
     checkFreshProofPreservesRawKeys()
+    checkFocusResolutionAndTransfer()
+    checkFocusRecoveryEpisode()
+}
+
+private func checkFocusRecoveryEpisode() {
+    var episode = FocusRecoveryEpisode()
+    episode.observe(revision: 7, guarded: true)
+    for _ in 0..<3 {
+        check(episode.canRearm, "guarded episode permits bounded rearm")
+        episode.didRearm()
+    }
+    check(!episode.canRearm, "fourth rearm is capped")
+    episode.observe(revision: 7, guarded: true)
+    check(!episode.canRearm, "unchanged revision cannot reset cap")
+    episode.observe(revision: 6, guarded: true)
+    check(!episode.canRearm, "older revision cannot reset cap")
+    episode.observe(revision: 8, guarded: true)
+    check(episode.canRearm && episode.rearmCount == 0, "revision progress resets cap")
+    episode.didRearm()
+    episode.observe(revision: 8, guarded: false)
+    check(episode.revision == nil && episode.rearmCount == 0, "cleared guards reset episode")
+    episode.observe(revision: 8, guarded: true)
+    episode.didRearm()
+    episode.reset()
+    check(episode.rearmCount == 0 && episode.revision == nil, "validated proof resets episode")
+}
+
+private func checkFocusResolutionAndTransfer() {
+    let failed = PinnedFocusRead<String>.failed
+    let none = PinnedFocusRead<String>.success(nil)
+    let editor = PinnedFocusRead<String>.success("editor")
+    check(failed.classificationElement(fallback: "notification") == "notification" && failed.proofElement == nil,
+          "failed pinned read uses notification for classification only")
+    check(none.classificationElement(fallback: "notification") == nil && none.proofElement == nil,
+          "successful nil pinned read does not use notification")
+    check(editor.classificationElement(fallback: "notification") == "editor" && editor.proofElement == "editor",
+          "pinned editor replaces autocomplete notification")
+
+    let old = CaretRecoveryFreshness(revision: 7, epoch: 2, generation: 3, isRunning: true, isActiveHost: true)
+    func eligible(current: CaretRecoveryFreshness? = nil, epoch: UInt64 = 2, oldPID: pid_t? = 42,
+                  pendingPID: pid_t? = 42, pid: pid_t? = 42, bundle: String? = "app",
+                  pendingBundle: String? = "app", pendingRecovery: Bool = false, pendingBackspace: Bool = false,
+                  oldBackspace: Bool = false, backspacePending: Bool = false, count: Int = 0,
+                  desynced: Bool = false, guardActive: Bool = true) -> Bool {
+        CaretRecoveryFreshness.canTransferRecovery(old: old,
+            current: current ?? .init(revision: 8, epoch: 2, generation: 4, isRunning: true, isActiveHost: true),
+            pendingEpoch: epoch, oldPID: oldPID, pendingPID: pendingPID, currentPID: pid,
+            oldBundle: "app", pendingBundle: pendingBundle, currentBundle: bundle,
+            pendingHasRecovery: pendingRecovery, pendingBackspace: pendingBackspace, oldBackspace: oldBackspace,
+            backspacePending: backspacePending, retryCount: count, desynced: desynced, hasSoftGuard: guardActive)
+    }
+    check(eligible() && eligible(count: 2), "compatible pending pass accepts bounded fresh transfer")
+    let invalid = [eligible(epoch: 3), eligible(oldPID: nil), eligible(pendingPID: 43), eligible(pid: 43),
+                   eligible(bundle: "other"), eligible(pendingBundle: "other"), eligible(pendingRecovery: true),
+                   eligible(pendingBackspace: true), eligible(oldBackspace: true), eligible(backspacePending: true),
+                   eligible(count: 3), eligible(desynced: true), eligible(guardActive: false),
+                   eligible(current: .init(revision: 6, epoch: 2, generation: 4, isRunning: true, isActiveHost: true)),
+                   eligible(current: .init(revision: 8, epoch: 3, generation: 4, isRunning: true, isActiveHost: true)),
+                   eligible(current: .init(revision: 8, epoch: 2, generation: 3, isRunning: true, isActiveHost: true)),
+                   eligible(current: .init(revision: 8, epoch: 2, generation: 4, isRunning: false, isActiveHost: true)),
+                   eligible(current: .init(revision: 8, epoch: 2, generation: 4, isRunning: true, isActiveHost: false))]
+    check(invalid.allSatisfy { !$0 }, "transfer rejects identity, freshness, proof, guard and budget changes")
+    let start = CFAbsoluteTimeGetCurrent()
+    var accepted = 0
+    for _ in 0..<100_000 { if eligible() { accepted += 1 } }
+    let elapsed = CFAbsoluteTimeGetCurrent() - start
+    check(accepted == 100_000, "transfer decision remains deterministic")
+    print("transfer decisions: 100000 in \(elapsed) seconds")
 }
 
 private func checkFreshProofPreservesRawKeys() {

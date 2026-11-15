@@ -4,12 +4,61 @@ enum CaretRecoveryApplyVerdict: Equatable {
     case applied, missingReport, invalidContext, staleRevision
 }
 
+enum PinnedFocusRead<Element> {
+    case failed
+    case success(Element?)
+
+    func classificationElement(fallback: Element?) -> Element? {
+        switch self {
+        case .failed: return fallback
+        case .success(let element): return element
+        }
+    }
+
+    var proofElement: Element? {
+        if case .success(let element) = self { return element }
+        return nil
+    }
+}
+
+struct FocusRecoveryEpisode {
+    private(set) var revision: UInt64?
+    private(set) var rearmCount = 0
+
+    mutating func observe(revision: UInt64, guarded: Bool) {
+        guard guarded else { reset(); return }
+        if self.revision == nil || revision > self.revision! {
+            self.revision = revision
+            rearmCount = 0
+        }
+    }
+
+    var canRearm: Bool { rearmCount < 3 }
+    mutating func didRearm() { rearmCount += 1 }
+    mutating func reset() { revision = nil; rearmCount = 0 }
+}
+
 struct CaretRecoveryFreshness: Equatable {
     let revision: UInt64
     let epoch: UInt64
     let generation: UInt64
     let isRunning: Bool
     let isActiveHost: Bool
+
+    static func canTransferRecovery(old: CaretRecoveryFreshness, current: CaretRecoveryFreshness,
+                                    pendingEpoch: UInt64, oldPID: pid_t?, pendingPID: pid_t?,
+                                    currentPID: pid_t?, oldBundle: String?, pendingBundle: String?,
+                                    currentBundle: String?, pendingHasRecovery: Bool, pendingBackspace: Bool,
+                                    oldBackspace: Bool, backspacePending: Bool, retryCount: Int,
+                                    desynced: Bool, hasSoftGuard: Bool) -> Bool {
+        guard let pid = oldPID else { return false }
+        return old.isRunning && old.isActiveHost && current.isRunning && current.isActiveHost &&
+            old.epoch == current.epoch && pendingEpoch == old.epoch &&
+            current.generation != old.generation && current.revision >= old.revision &&
+            pid == pendingPID && pid == currentPID && oldBundle == pendingBundle && oldBundle == currentBundle &&
+            !pendingHasRecovery && !pendingBackspace && !oldBackspace && !backspacePending &&
+            retryCount < 3 && !desynced && hasSoftGuard
+    }
 
     static func acceptFocusNotification(epoch: inout UInt64, isActiveHost: Bool,
                                         elapsed: TimeInterval, throttleInterval: TimeInterval) -> Bool {

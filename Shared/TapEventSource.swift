@@ -273,6 +273,13 @@ final class TapEventSource {
     var onRecoveryScheduledForTesting: ((UInt64) -> Void)?
     var onBackspaceProofScheduledForTesting: ((UInt64) -> Void)?
     var axPassReadForTesting: ((UInt64, UInt64?, Bool) -> (AXSnapshot, CaretWordReport?))?
+    var pinnedFocusReadForTesting: ((pid_t?) -> PinnedFocusRead<AXUIElement>)?
+    var focusedInfoForTesting: ((AXUIElement) -> AppBehaviorDetector.FocusedElementInfo)?
+    var onAXSnapshotForTesting: ((AXSnapshot) -> Void)?
+    var focusElapsedForTesting: (() -> CFAbsoluteTime)?
+    private var focusRecoveryEpisode = FocusRecoveryEpisode()
+    private var focusRecoveryDemand: (epoch: UInt64, pid: pid_t, bundleId: String?)?
+    private var focusRecoveryIdentity: (pid: pid_t, bundleId: String?)?
 
     private struct BackspaceProofToken {
         let id: UInt64
@@ -316,12 +323,13 @@ final class TapEventSource {
     private struct PendingAXPass {
         let generation: UInt64
         let element: AXUIElement?
-        let recoveryRevision: UInt64?
+        var recoveryRevision: UInt64?
         let recoveryEpoch: UInt64
         let appPID: pid_t?
         let appBundleId: String?
         let isBackspaceProof: Bool
-        let recoveryRetryCount: Int
+        var recoveryRetryCount: Int
+        var recoveryDemandTransferred = false
         /// Takes the source rather than capturing it, so a queued pass never keeps a
         /// released source alive past its deinit.
         let apply: (TapEventSource, AXSnapshot) -> Void
@@ -344,6 +352,8 @@ final class TapEventSource {
         /// OverlayAppDetector's split probe: the AX read on the pass's queue, the cache
         /// write and the visibility callback on main.
         let overlayName: String?
+        var resolvedElement: AXUIElement? = nil
+        var recoveryDemandTransferred = false
     }
 
     init(handler: KeyboardEventHandler,
@@ -388,6 +398,7 @@ final class TapEventSource {
         ) { [weak self] notification in
             guard let self = self else { return }
             self.recoveryEpoch &+= 1
+            self.clearFocusRecovery()
             self.cancelBackspaceProof()
 
             // Record the new frontmost app for per-keystroke exclusion checks.
@@ -506,7 +517,7 @@ final class TapEventSource {
                         let textMethodName = injectionInfo.textSendingMethod == .chunked ? "Chunked" : "OneByOne"
                         source.onLogEvent?("   Injection: \(injectionInfo.method) (\(injectionInfo.description)) [\(textMethodName)] ✓ confirmed")
                     }
-                    if let fresh = fresh {
+                    if let fresh = fresh, !snapshot.recoveryDemandTransferred {
                         source.scheduleCaretRecovery(freshness: fresh)
                     }
                 }
@@ -550,6 +561,7 @@ final class TapEventSource {
         guard isRunning else { return }
         if cachedProofPID != pid || cachedProofBundleId != bundleId {
             cancelBackspaceProof()
+            clearFocusRecovery()
         }
         cachedProofPID = pid
         cachedProofBundleId = bundleId
@@ -566,6 +578,7 @@ final class TapEventSource {
     func handleBrowserRegistryReload() {
         guard isRunning else { return }
         recoveryEpoch &+= 1
+        clearFocusRecovery()
         axPassGeneration &+= 1
         pendingAXPass = nil
         cancelBackspaceProof()
@@ -585,6 +598,7 @@ final class TapEventSource {
     func stop() {
         guard isRunning else { return }
         isRunning = false
+        clearFocusRecovery()
         if let observer = browserRegistryObserver {
             NotificationCenter.default.removeObserver(observer)
             browserRegistryObserver = nil
@@ -672,14 +686,14 @@ final class TapEventSource {
         guard isActiveHost() else { return }
 
         axPassGeneration &+= 1
-        let app = proofAnchor == nil ? NSWorkspace.shared.frontmostApplication : nil
+        let identity = proofAnchor == nil ? currentRecoveryIdentity() : (pid: nil, bundleId: nil)
         if proofAnchor == nil {
-            recordFrontmostApplicationIdentity(pid: app?.processIdentifier, bundleId: app?.bundleIdentifier)
+            recordFrontmostApplicationIdentity(pid: identity.pid, bundleId: identity.bundleId)
         }
         let pass = PendingAXPass(generation: axPassGeneration, element: element,
                                  recoveryRevision: recoveryRevision, recoveryEpoch: recoveryEpoch,
-                                 appPID: proofAnchor?.pid ?? app?.processIdentifier,
-                                 appBundleId: proofAnchor == nil ? app?.bundleIdentifier : proofAnchor?.bundleId,
+                                 appPID: proofAnchor?.pid ?? identity.pid,
+                                 appBundleId: proofAnchor == nil ? identity.bundleId : proofAnchor?.bundleId,
                                  isBackspaceProof: isBackspaceProof, recoveryRetryCount: recoveryRetryCount,
                                  apply: apply)
 
@@ -697,6 +711,8 @@ final class TapEventSource {
         // the frontmost app is AppKit state. Pinning it here also ties the window title
         // and the DOM-attribute gate to the app that was frontmost when the pass started.
         let readOverride = axPassReadForTesting
+        let pinnedReadOverride = pinnedFocusReadForTesting
+        let focusedInfoOverride = focusedInfoForTesting
         let appElement = readOverride == nil ? pass.appPID.map { AXUIElementCreateApplication($0) } : nil
         let bundleId = pass.appBundleId
 
@@ -716,6 +732,7 @@ final class TapEventSource {
             let readerDiagnostic: String?
             let probedOverlayName: String?
             let testSnapshot: AXSnapshot?
+            let resolvedElement: AXUIElement?
             if let readOverride = readOverride {
                 let (snapshot, report) = readOverride(pass.generation, pass.recoveryRevision, pass.isBackspaceProof)
                 testSnapshot = snapshot
@@ -724,22 +741,35 @@ final class TapEventSource {
                 recoveryReport = report
                 readerDiagnostic = nil
                 probedOverlayName = nil
+                resolvedElement = snapshot.resolvedElement
             } else {
                 testSnapshot = nil
                 let focusedElement: AXUIElement?
-                if pass.recoveryRevision != nil, let appElement = appElement {
+                let proofElement: AXUIElement?
+                if pass.recoveryRevision != nil || pass.element != nil {
                     var value: CFTypeRef?
-                    if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &value) == .success,
-                       let value = value, CFGetTypeID(value) == AXUIElementGetTypeID() {
-                        focusedElement = (value as! AXUIElement)
+                    let read: PinnedFocusRead<AXUIElement>
+                    if let pinnedReadOverride = pinnedReadOverride {
+                        read = pinnedReadOverride(pass.appPID)
+                    } else if let appElement = appElement,
+                       AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &value) == .success {
+                        if let value = value, CFGetTypeID(value) == AXUIElementGetTypeID() {
+                            read = .success(value as! AXUIElement)
+                        } else {
+                            read = .success(nil)
+                        }
                     } else {
-                        focusedElement = nil
+                        read = .failed
                     }
+                    focusedElement = read.classificationElement(fallback: pass.element)
+                    proofElement = read.proofElement
                 } else {
-                    focusedElement = pass.element ?? AXHelper.getFocusedElement()
+                    focusedElement = AXHelper.getFocusedElement()
+                    proofElement = nil
                 }
+                resolvedElement = focusedElement
                 if let element = focusedElement {
-                    focusedInfo = .from(element, appElement: appElement)
+                    focusedInfo = focusedInfoOverride?(element) ?? .from(element, appElement: appElement)
                     hasFocusedElement = true
                 } else {
                     focusedInfo = .withoutFocusedElement(appElement: appElement)
@@ -747,7 +777,7 @@ final class TapEventSource {
                 }
                 focusedInfo.materialise(bundleId: bundleId, includingCaret: needsCaret)
                 var recoveryDiagnostic: String?
-                if let revision = pass.recoveryRevision, let element = focusedElement, let appElement = appElement {
+                if let revision = pass.recoveryRevision, let element = proofElement, let appElement = appElement {
                     // materialise resolves domClasses for AXTextField above; the role gate
                     // prevents this access from resolving the lazy property for other roles.
                     let canUseOmniboxMetadata = !pass.isBackspaceProof && focusedInfo.role == "AXTextField"
@@ -798,7 +828,10 @@ final class TapEventSource {
 
                 guard let self = self else { return }
                 self.axPassInFlight = false
-                defer { self.runPendingAXPass() }
+                defer {
+                    self.runPendingAXPass()
+                    self.drainFocusRecoveryDemand()
+                }
                 self.logRecoveryRead(pass, focusedInfo: focusedInfo, hasFocusedElement: hasFocusedElement,
                                      report: recoveryReport, diagnostic: readerDiagnostic)
 
@@ -808,6 +841,7 @@ final class TapEventSource {
                 // down or on a host that has already yielded.
                 guard isCurrent else {
                     self.logStaleAXPass(pass)
+                    self.transferSupersededRecovery(pass)
                     return
                 }
 
@@ -817,13 +851,40 @@ final class TapEventSource {
                     return
                 }
 
-                let snapshot = testSnapshot ?? AXSnapshot(generation: pass.generation, focusedInfo: focusedInfo,
+                var snapshot = testSnapshot ?? AXSnapshot(generation: pass.generation, focusedInfo: focusedInfo,
                                                           hasFocusedElement: hasFocusedElement,
                                                           overlayName: OverlayAppDetector.shared.lastKnownOverlayName)
+                snapshot.resolvedElement = resolvedElement
+                snapshot.recoveryDemandTransferred = pass.recoveryDemandTransferred
+                self.onAXSnapshotForTesting?(snapshot)
                 pass.apply(self, snapshot)
                 self.applyRecoveryResult(pass, report: recoveryReport)
             }
         }
+    }
+
+    private func transferSupersededRecovery(_ pass: PendingAXPass) {
+        guard let revision = pass.recoveryRevision, var pending = pendingAXPass else { return }
+        let current = recoveryFreshness
+        let identity = recoveryIdentityForTesting?() ?? {
+            let app = NSWorkspace.shared.frontmostApplication
+            return (pid: app?.processIdentifier, bundleId: app?.bundleIdentifier)
+        }()
+        let old = CaretRecoveryFreshness(revision: revision, epoch: pass.recoveryEpoch,
+                                         generation: pass.generation, isRunning: true, isActiveHost: true)
+        let engine = handler.engine
+        guard CaretRecoveryFreshness.canTransferRecovery(old: old, current: current,
+            pendingEpoch: pending.recoveryEpoch, oldPID: pass.appPID, pendingPID: pending.appPID,
+            currentPID: identity.pid, oldBundle: pass.appBundleId, pendingBundle: pending.appBundleId,
+            currentBundle: identity.bundleId, pendingHasRecovery: pending.recoveryRevision != nil,
+            pendingBackspace: pending.isBackspaceProof, oldBackspace: pass.isBackspaceProof,
+            backspacePending: backspaceProofToken != nil, retryCount: pass.recoveryRetryCount,
+            desynced: engine.bufferDesyncDetected,
+            hasSoftGuard: engine.cursorMovedSinceReset || engine.focusChangedDuringTyping) else { return }
+        pending.recoveryRevision = current.revision
+        pending.recoveryRetryCount = pass.recoveryRetryCount + 1
+        pending.recoveryDemandTransferred = true
+        pendingAXPass = pending
     }
 
     private func applyRecoveryResult(_ pass: PendingAXPass, report: CaretWordReport?) {
@@ -844,6 +905,7 @@ final class TapEventSource {
             current: current, expectedPID: pass.appPID, currentPID: identity.pid,
             expectedBundleId: pass.appBundleId, currentBundleId: identity.bundleId) {
             let outcome = handler.recoverCaretWord($0, nativeBackspaceProof: pass.isBackspaceProof)
+            if outcome == .validated { clearFocusRecovery() }
             onLogEvent?("Caret recovery outcome: \(outcome)")
         }
         if verdict == .staleRevision {
@@ -923,6 +985,7 @@ final class TapEventSource {
         guard !axPassInFlight, !backspaceProofQueueBusyForTesting else { return }
         guard let pass = pendingAXPass else {
             drainBackspaceProof()
+            drainFocusRecoveryDemand()
             return
         }
         pendingAXPass = nil
@@ -1046,6 +1109,7 @@ final class TapEventSource {
 
     func stopBackspaceProofForTesting() {
         isRunning = false
+        clearFocusRecovery()
         handler.onNativeBackspacePassedThrough = nil
         cancelBackspaceProof()
         cachedProofPID = nil
@@ -1110,7 +1174,7 @@ final class TapEventSource {
             let fresh = source.applyRecoveryBookkeeping(trigger: trigger, snapshot: snapshot) {
                 source.applyFocusCheck(snapshot)
             }
-            if let fresh = fresh {
+            if let fresh = fresh, !snapshot.recoveryDemandTransferred {
                 source.scheduleCaretRecovery(freshness: fresh)
             }
         }
@@ -1148,30 +1212,87 @@ final class TapEventSource {
             "running=\(freshness.isRunning),active=\(freshness.isActiveHost)"
     }
 
+    @discardableResult
     private func scheduleCaretRecovery(freshness: CaretRecoveryFreshness, recoveryRetryCount: Int = 0,
-                                       proofAnchor: (pid: pid_t, bundleId: String?)? = nil) {
+                                       proofAnchor: (pid: pid_t, bundleId: String?)? = nil) -> Bool {
         guard freshness.matches(recoveryFreshness) else {
             onLogEvent?("Caret recovery not scheduled: stale expected=\(describeFreshness(freshness)) " +
                         "current=\(describeFreshness(recoveryFreshness))")
-            return
+            return false
         }
         guard pendingAXPass == nil, !axPassInFlight else {
             onLogEvent?("Caret recovery not scheduled: busy retry=\(recoveryRetryCount)/3 " +
                         "pending=\(pendingAXPass != nil) inFlight=\(axPassInFlight) \(describeFreshness(freshness))")
-            return
+            return false
         }
         guard recoveryEligibilityForTesting?() ?? handler.canRecoverCaretWord else {
             onLogEvent?("Caret recovery not scheduled: ineligible context \(describeFreshness(freshness))")
-            return
+            return false
         }
         scheduleAXPass(element: nil, recoveryRevision: freshness.revision, proofAnchor: proofAnchor,
                        recoveryRetryCount: recoveryRetryCount) { _, _ in }
+        if focusRecoveryDemand?.epoch == freshness.epoch { focusRecoveryDemand = nil }
         onRecoveryScheduledForTesting?(freshness.revision)
+        return true
+    }
+
+    private func clearFocusRecovery() {
+        focusRecoveryDemand = nil
+        focusRecoveryIdentity = nil
+        focusRecoveryEpisode.reset()
+    }
+
+    private func noteFocusRecoveryDemand() {
+        let engine = handler.engine
+        let guarded = engine.cursorMovedSinceReset || engine.focusChangedDuringTyping
+        focusRecoveryEpisode.observe(revision: handler.typingRevision, guarded: guarded)
+        guard guarded, isRunning, isActiveHost() else { clearFocusRecovery(); return }
+        guard !engine.bufferDesyncDetected else { focusRecoveryDemand = nil; return }
+        let identity = currentRecoveryIdentity()
+        guard let pid = identity.pid else { clearFocusRecovery(); return }
+        if let previous = focusRecoveryIdentity,
+           previous.pid != pid || previous.bundleId != identity.bundleId {
+            focusRecoveryEpisode.reset()
+            focusRecoveryEpisode.observe(revision: handler.typingRevision, guarded: true)
+        }
+        focusRecoveryIdentity = (pid, identity.bundleId)
+        focusRecoveryDemand = (recoveryEpoch, pid, identity.bundleId)
+    }
+
+    private func currentRecoveryIdentity() -> (pid: pid_t?, bundleId: String?) {
+        if let override = recoveryIdentityForTesting { return override() }
+        let app = NSWorkspace.shared.frontmostApplication
+        return (app?.processIdentifier, app?.bundleIdentifier)
+    }
+
+    private func drainFocusRecoveryDemand() {
+        guard let demand = focusRecoveryDemand else { return }
+        let engine = handler.engine
+        let guarded = engine.cursorMovedSinceReset || engine.focusChangedDuringTyping
+        focusRecoveryEpisode.observe(revision: handler.typingRevision, guarded: guarded)
+        let identity = currentRecoveryIdentity()
+        guard guarded, isRunning, isActiveHost(), demand.epoch == recoveryEpoch,
+              demand.pid == identity.pid, demand.bundleId == identity.bundleId else {
+            clearFocusRecovery()
+            return
+        }
+        guard !engine.bufferDesyncDetected else { focusRecoveryDemand = nil; return }
+        guard !axPassInFlight, pendingAXPass == nil, backspaceProofToken == nil,
+              !backspaceProofQueueBusyForTesting else { return }
+        guard focusRecoveryEpisode.canRearm else { focusRecoveryDemand = nil; return }
+        focusRecoveryDemand = nil
+        if scheduleCaretRecovery(freshness: recoveryFreshness, proofAnchor: (demand.pid, demand.bundleId)) {
+            focusRecoveryEpisode.didRearm()
+        }
     }
 
     func scheduleCaretRecoveryForTesting(pid: pid_t, bundleId: String?) {
         isRunning = true
         scheduleCaretRecovery(freshness: recoveryFreshness, proofAnchor: (pid, bundleId))
+    }
+
+    func scheduleReplacementForTesting(pid: pid_t, bundleId: String?, apply: @escaping () -> Void) {
+        scheduleAXPass(element: nil, proofAnchor: (pid, bundleId)) { _, _ in apply() }
     }
 
     /// Main-thread stage of the focus check.
@@ -1374,8 +1495,9 @@ final class TapEventSource {
         let activeHost = isActiveHost()
         let accepted = CaretRecoveryFreshness.acceptFocusNotification(
             epoch: &recoveryEpoch, isActiveHost: activeHost,
-            elapsed: CFAbsoluteTimeGetCurrent() - lastAXFocusChangeTime,
+            elapsed: focusElapsedForTesting?() ?? (CFAbsoluteTimeGetCurrent() - lastAXFocusChangeTime),
             throttleInterval: axFocusChangeThrottleInterval)
+        noteFocusRecoveryDemand()
         guard activeHost else {
             // Ownership flipped while this observer was live. Tear it down here rather
             // than waiting for an app switch that may never come — otherwise every focus
@@ -1393,23 +1515,25 @@ final class TapEventSource {
         // the last re-detection that actually landed, not from the last read that ran.
         // Bursts arriving while a pass is in flight are coalesced by scheduleAXPass
         // instead.
-        guard accepted else { return }
+        guard accepted else { drainFocusRecoveryDemand(); return }
 
         let trigger = RecoveryTrigger(revision: handler.typingRevision, epoch: recoveryEpoch)
         scheduleAXPass(element: element) { source, snapshot in
             let previousSignature = source.lastFocusedElementSignature
             let fresh = source.applyRecoveryBookkeeping(trigger: trigger, snapshot: snapshot) {
-                source.applyAXFocusChange(element: element, snapshot: snapshot)
+                source.applyAXFocusChange(snapshot: snapshot)
             }
             let signature = snapshot.focusedInfo.signature
-            guard let fresh = fresh, !previousSignature.isEmpty, previousSignature != signature else { return }
+            guard let fresh = fresh, !snapshot.recoveryDemandTransferred,
+                  !previousSignature.isEmpty, previousSignature != signature else { return }
             source.scheduleCaretRecovery(freshness: fresh)
         }
+        drainFocusRecoveryDemand()
     }
 
     /// Main-thread stage of the focus-change pass: everything handleAXFocusChanged used
     /// to do after its AX snapshot, with the snapshot handed in already materialised.
-    private func applyAXFocusChange(element: AXUIElement, snapshot: AXSnapshot) {
+    private func applyAXFocusChange(snapshot: AXSnapshot) {
         // Assigned here rather than at schedule time, so the field says what it means:
         // when the last focus-change re-detection was applied. This is the only
         // assignment, so a pass that never reaches this line leaves the throttle window
@@ -1500,7 +1624,11 @@ final class TapEventSource {
             onCheckToolbarForFocusedElement?(elementInfo)
         } else {
             // Just update for tracking
-            onUpdateLastFocusedElement?(element)
+            if let element = snapshot.resolvedElement {
+                onUpdateLastFocusedElement?(element)
+            } else {
+                onResetLastFocusedElement?()
+            }
         }
     }
 

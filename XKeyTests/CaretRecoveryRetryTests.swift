@@ -1,19 +1,268 @@
 import XCTest
+import ApplicationServices
 @testable import XKey
 
 private final class CaretRetryHandler: KeyboardEventHandler {
     var onProof: ((Bool, RecoveryOutcome) -> Void)?
+    var forcedOutcome: RecoveryOutcome?
     override var canRecoverCaretWord: Bool { true }
 
     override func recoverCaretWord(_ report: CaretWordReport,
                                    nativeBackspaceProof: Bool = false) -> RecoveryOutcome {
-        let outcome = engine.recoverCaretWord(report, nativeBackspaceProof: nativeBackspaceProof)
+        let outcome = forcedOutcome ?? engine.recoverCaretWord(report, nativeBackspaceProof: nativeBackspaceProof)
         onProof?(nativeBackspaceProof, outcome)
         return outcome
     }
 }
 
+private final class CaretChromeDetector: AppBehaviorDetector {
+    override func getCurrentBundleId() -> String? { "com.google.Chrome" }
+}
+
 final class CaretRecoveryRetryTests: XCTestCase {
+    func testObserverResolvesPinnedEditorAndPreservesTransportProfile() throws {
+        let handler = CaretRetryHandler()
+        let source = retrySource(handler)
+        source.startBackspaceProofForTesting(pid: 42, bundleId: "app")
+        defer { source.stopBackspaceProofForTesting() }
+        let notification = AXUIElementCreateApplication(41)
+        let editor = AXUIElementCreateApplication(42)
+        let resolved = expectation(description: "resolved editor snapshot")
+        var reads = 0
+        source.pinnedFocusReadForTesting = { _ in reads += 1; return .success(editor) }
+        source.focusedInfoForTesting = { element in
+            let isEditor = CFEqual(element, editor)
+            return AppBehaviorDetector.FocusedElementInfo(element: element,
+                role: isEditor ? "AXTextField" : "AXStaticText", subrole: nil,
+                description: isEditor ? "Address and search bar" : nil,
+                identifier: nil, domClasses: isEditor ? ["OmniboxViewViews"] : nil,
+                roleDescription: nil)
+        }
+        var captured: TapEventSource.AXSnapshot?
+        source.onAXSnapshotForTesting = { snapshot in captured = snapshot; resolved.fulfill() }
+        source.handleAXFocusChanged(notification)
+        wait(for: [resolved], timeout: 5)
+        let snapshot = try XCTUnwrap(captured)
+        XCTAssertEqual(reads, 1)
+        XCTAssertTrue(CFEqual(try XCTUnwrap(snapshot.resolvedElement), editor))
+        XCTAssertEqual(snapshot.focusedInfo.role, "AXTextField")
+        let detector = CaretChromeDetector()
+        let method = detector.detectInjectionMethod(focusedInfo: snapshot.focusedInfo, resolvedOverlayName: .some(nil))
+        XCTAssertEqual(method.description, "Chromium Address Bar")
+        XCTAssertTrue(method.needsEmptyCharPrefix)
+        XCTAssertNotNil(SelectedSuffixInjectionProfile(methodInfo: method))
+    }
+
+    func testPinnedReadFailureFallsBackButSuccessfulNilDoesNot() {
+        for failure in [true, false] {
+            let source = retrySource(CaretRetryHandler())
+            source.startBackspaceProofForTesting(pid: 42, bundleId: "app")
+            defer { source.stopBackspaceProofForTesting() }
+            let notification = AXUIElementCreateApplication(41)
+            let received = expectation(description: "focus resolution completed")
+            var reads = 0
+            source.pinnedFocusReadForTesting = { _ in
+                reads += 1
+                return failure ? .failed : .success(nil)
+            }
+            source.focusedInfoForTesting = { element in
+                AppBehaviorDetector.FocusedElementInfo(element: element, role: "AXStaticText", subrole: nil,
+                    description: nil, identifier: nil, roleDescription: nil)
+            }
+            source.onAXSnapshotForTesting = { snapshot in
+                XCTAssertEqual(snapshot.hasFocusedElement, failure)
+                if failure {
+                    XCTAssertTrue(snapshot.resolvedElement.map { CFEqual($0, notification) } ?? false)
+                    XCTAssertEqual(snapshot.focusedInfo.role, "AXStaticText")
+                } else {
+                    XCTAssertNil(snapshot.resolvedElement)
+                }
+                received.fulfill()
+            }
+            source.handleAXFocusChanged(notification)
+            wait(for: [received], timeout: 5)
+            XCTAssertEqual(reads, 1)
+        }
+    }
+
+    func testFocusEpochRearmsAfterAcceptedAndThrottledBusyPasses() {
+        for accepted in [true, false] {
+            let handler = CaretRetryHandler()
+            let source = retrySource(handler)
+            source.startBackspaceProofForTesting(pid: 42, bundleId: "app")
+            defer { source.stopBackspaceProofForTesting() }
+            type("o", handler: handler)
+            handler.engine.focusChangedDuringTyping = true
+            let entered = expectation(description: "old recovery entered")
+            let rearmed = expectation(description: "new epoch recovery scheduled")
+            let release = DispatchSemaphore(value: 0)
+            defer { release.signal() }
+            var reads = 0
+            var schedules = 0
+            source.focusElapsedForTesting = { accepted ? 1 : 0 }
+            source.onRecoveryScheduledForTesting = { _ in
+                schedules += 1
+                if schedules == 2 { rearmed.fulfill() }
+            }
+            source.axPassReadForTesting = { generation, revision, _ in
+                reads += 1
+                if reads == 1 { entered.fulfill(); _ = release.wait(timeout: .now() + 5) }
+                return (self.snapshot(generation), nil)
+            }
+            source.scheduleCaretRecoveryForTesting(pid: 42, bundleId: "app")
+            wait(for: [entered], timeout: 5)
+            source.handleAXFocusChanged(AXUIElementCreateApplication(42))
+            XCTAssertEqual(schedules, 1)
+            release.signal()
+            wait(for: [rearmed], timeout: 5)
+            XCTAssertEqual(schedules, 2)
+            XCTAssertGreaterThanOrEqual(reads, accepted ? 2 : 1)
+        }
+    }
+
+    func testThrottledRearmCapRejectsNonApplicableAndResetsOnProgress() {
+        let handler = CaretRetryHandler()
+        let source = retrySource(handler)
+        source.startBackspaceProofForTesting(pid: 42, bundleId: "app")
+        defer { source.stopBackspaceProofForTesting() }
+        type("o", handler: handler)
+        handler.engine.focusChangedDuringTyping = true
+        handler.forcedOutcome = .notApplicable
+        source.focusElapsedForTesting = { 0 }
+        var count = 0
+        var reportWord = "o"
+        var proof: XCTestExpectation?
+        source.onRecoveryScheduledForTesting = { _ in count += 1 }
+        handler.onProof = { _, _ in proof?.fulfill() }
+        source.axPassReadForTesting = { generation, revision, _ in
+            (self.snapshot(generation), self.proofReport(reportWord, revision: revision!))
+        }
+        for _ in 0..<3 {
+            proof = expectation(description: "non-applicable proof")
+            source.handleAXFocusChanged(AXUIElementCreateApplication(42))
+            wait(for: [proof!], timeout: 5)
+        }
+        source.handleAXFocusChanged(AXUIElementCreateApplication(42))
+        XCTAssertEqual(count, 3, "non-applicable proof must not reset the episode cap")
+        type("b", handler: handler)
+        proof = expectation(description: "revision progress permits another proof")
+        source.handleAXFocusChanged(AXUIElementCreateApplication(42))
+        wait(for: [proof!], timeout: 5)
+        XCTAssertEqual(count, 4)
+        handler.forcedOutcome = nil
+        reportWord = "ob"
+        proof = expectation(description: "actual validated proof")
+        source.handleAXFocusChanged(AXUIElementCreateApplication(42))
+        wait(for: [proof!], timeout: 5)
+        XCTAssertFalse(handler.engine.focusChangedDuringTyping)
+        handler.engine.focusChangedDuringTyping = true
+        proof = expectation(description: "validated episode permits new rearm")
+        source.handleAXFocusChanged(AXUIElementCreateApplication(42))
+        wait(for: [proof!], timeout: 5)
+        XCTAssertEqual(count, 6)
+    }
+
+    func testThrottledRearmRequiresGuardsAndActiveRunningHost() {
+        let handler = CaretRetryHandler()
+        var active = true
+        let source = retrySource(handler, active: { active })
+        source.startBackspaceProofForTesting(pid: 42, bundleId: "app")
+        source.focusElapsedForTesting = { 0 }
+        var count = 0
+        source.onRecoveryScheduledForTesting = { _ in count += 1 }
+        let notification = AXUIElementCreateApplication(42)
+        source.handleAXFocusChanged(notification)
+        handler.engine.focusChangedDuringTyping = true
+        handler.engine.bufferDesyncDetected = true
+        source.handleAXFocusChanged(notification)
+        handler.engine.bufferDesyncDetected = false
+        active = false
+        source.handleAXFocusChanged(notification)
+        active = true
+        source.stopBackspaceProofForTesting()
+        source.handleAXFocusChanged(notification)
+        XCTAssertEqual(count, 0)
+    }
+
+    func testBusyFocusDemandIsDiscardedAfterContextChanges() {
+        for change in ["guards", "desync", "host", "stop", "identity"] {
+            let handler = CaretRetryHandler()
+            var active = true
+            var identity: (pid: pid_t?, bundleId: String?) = (42, "app")
+            let source = retrySource(handler, active: { active })
+            source.recoveryIdentityForTesting = { identity }
+            source.startBackspaceProofForTesting(pid: 42, bundleId: "app")
+            defer { source.stopBackspaceProofForTesting() }
+            type("o", handler: handler)
+            handler.engine.focusChangedDuringTyping = true
+            source.focusElapsedForTesting = { 0 }
+            let entered = expectation(description: "old read entered: \(change)")
+            let settled = expectation(description: "old read finished: \(change)")
+            let release = DispatchSemaphore(value: 0)
+            defer { release.signal() }
+            var count = 0
+            source.onRecoveryScheduledForTesting = { _ in count += 1 }
+            source.onLogEvent = { message in
+                if message.hasPrefix("Caret recovery read:") {
+                    DispatchQueue.main.async { settled.fulfill() }
+                }
+            }
+            source.axPassReadForTesting = { generation, _, _ in
+                entered.fulfill()
+                _ = release.wait(timeout: .now() + 5)
+                return (self.snapshot(generation), nil)
+            }
+            source.scheduleCaretRecoveryForTesting(pid: 42, bundleId: "app")
+            wait(for: [entered], timeout: 5)
+            source.handleAXFocusChanged(AXUIElementCreateApplication(42))
+            switch change {
+            case "guards": handler.engine.focusChangedDuringTyping = false
+            case "desync": handler.engine.bufferDesyncDetected = true
+            case "host": active = false
+            case "stop": source.stopBackspaceProofForTesting()
+            default: identity.pid = 43
+            }
+            release.signal()
+            wait(for: [settled], timeout: 5)
+            XCTAssertEqual(count, 1, "\(change) must discard pending demand")
+        }
+    }
+
+    func testSupersededProofTransfersToPendingPassWithFreshRead() {
+        let handler = CaretRetryHandler()
+        let source = retrySource(handler)
+        defer { source.stopBackspaceProofForTesting() }
+        type("o", handler: handler)
+        handler.engine.focusChangedDuringTyping = true
+        let entered = expectation(description: "old read entered")
+        let applied = expectation(description: "fresh proof applied")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        var reads = 0
+        var bookkeeping = 0
+        source.axPassReadForTesting = { generation, revision, _ in
+            reads += 1
+            if reads == 1 {
+                entered.fulfill()
+                _ = release.wait(timeout: .now() + 5)
+            }
+            return (self.snapshot(generation), self.proofReport(reads == 1 ? "o" : "ob", revision: revision!))
+        }
+        handler.onProof = { _, outcome in
+            XCTAssertEqual(outcome, .validated)
+            applied.fulfill()
+        }
+        source.scheduleCaretRecoveryForTesting(pid: 42, bundleId: "app")
+        wait(for: [entered], timeout: 5)
+        type("b", handler: handler)
+        source.scheduleReplacementForTesting(pid: 42, bundleId: "app") { bookkeeping += 1 }
+        release.signal()
+        wait(for: [applied], timeout: 5)
+        XCTAssertEqual(reads, 2)
+        XCTAssertEqual(bookkeeping, 1)
+        XCTAssertFalse(handler.engine.focusChangedDuringTyping)
+    }
+
     private func snapshot(_ generation: UInt64) -> TapEventSource.AXSnapshot {
         TapEventSource.AXSnapshot(generation: generation, focusedInfo: .empty,
                                   hasFocusedElement: false, overlayName: nil)
