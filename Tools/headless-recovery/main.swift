@@ -339,4 +339,5 @@ do {
 
 runBackspaceContextScenarios()
 runSelectedSuffixScenarios()
+runRecoveryRetryScenarios()
 print("Headless production-engine recovery checks passed")

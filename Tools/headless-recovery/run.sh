@@ -19,6 +19,7 @@ swiftc \
     Tools/headless-recovery/Stubs.swift \
     Tools/headless-recovery/BackspaceContextScenarios.swift \
     Tools/headless-recovery/SelectedSuffixScenarios.swift \
+    Tools/headless-recovery/RecoveryRetryScenarios.swift \
     Tools/headless-recovery/main.swift \
     -o build/headless-recovery/run
 exec build/headless-recovery/run

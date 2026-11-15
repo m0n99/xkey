@@ -269,6 +269,7 @@ final class TapEventSource {
     private var recoveryEpoch: UInt64 = 0
 
     var recoveryEligibilityForTesting: (() -> Bool)?
+    var recoveryIdentityForTesting: (() -> (pid: pid_t?, bundleId: String?))?
     var onRecoveryScheduledForTesting: ((UInt64) -> Void)?
     var onBackspaceProofScheduledForTesting: ((UInt64) -> Void)?
     var axPassReadForTesting: ((UInt64, UInt64?, Bool) -> (AXSnapshot, CaretWordReport?))?
@@ -320,6 +321,7 @@ final class TapEventSource {
         let appPID: pid_t?
         let appBundleId: String?
         let isBackspaceProof: Bool
+        let recoveryRetryCount: Int
         /// Takes the source rather than capturing it, so a queued pass never keeps a
         /// released source alive past its deinit.
         let apply: (TapEventSource, AXSnapshot) -> Void
@@ -661,6 +663,7 @@ final class TapEventSource {
         element: AXUIElement?, recoveryRevision: UInt64? = nil,
         isBackspaceProof: Bool = false,
         proofAnchor: (pid: pid_t, bundleId: String?)? = nil,
+        recoveryRetryCount: Int = 0,
         apply: @escaping (TapEventSource, AXSnapshot) -> Void
     ) {
         // Ownership is checked here and again after the hop: a pass costs AX round-trips
@@ -677,7 +680,7 @@ final class TapEventSource {
                                  recoveryRevision: recoveryRevision, recoveryEpoch: recoveryEpoch,
                                  appPID: proofAnchor?.pid ?? app?.processIdentifier,
                                  appBundleId: proofAnchor == nil ? app?.bundleIdentifier : proofAnchor?.bundleId,
-                                 isBackspaceProof: isBackspaceProof,
+                                 isBackspaceProof: isBackspaceProof, recoveryRetryCount: recoveryRetryCount,
                                  apply: apply)
 
         guard !axPassInFlight else {
@@ -818,21 +821,52 @@ final class TapEventSource {
                                                           hasFocusedElement: hasFocusedElement,
                                                           overlayName: OverlayAppDetector.shared.lastKnownOverlayName)
                 pass.apply(self, snapshot)
-                let expected = CaretRecoveryFreshness(revision: pass.recoveryRevision ?? 0,
-                                                      epoch: pass.recoveryEpoch, generation: pass.generation,
-                                                      isRunning: true, isActiveHost: true)
-                let frontApp = NSWorkspace.shared.frontmostApplication
-                self.logRecoveryApply(pass, expected: expected, report: recoveryReport, frontApp: frontApp)
-                // Observer signatures may describe autocomplete, not the app's focused editor.
-                CaretRecoveryFreshness.applyIfCurrent(report: recoveryReport, expected: expected,
-                    current: self.recoveryFreshness, expectedPID: pass.appPID,
-                    currentPID: frontApp?.processIdentifier, expectedBundleId: pass.appBundleId,
-                    currentBundleId: frontApp?.bundleIdentifier) {
-                    let outcome = self.handler.recoverCaretWord($0, nativeBackspaceProof: pass.isBackspaceProof)
-                    self.onLogEvent?("Caret recovery outcome: \(outcome)")
-                }
+                self.applyRecoveryResult(pass, report: recoveryReport)
             }
         }
+    }
+
+    private func applyRecoveryResult(_ pass: PendingAXPass, report: CaretWordReport?) {
+        let expected = CaretRecoveryFreshness(revision: pass.recoveryRevision ?? 0,
+                                              epoch: pass.recoveryEpoch, generation: pass.generation,
+                                              isRunning: true, isActiveHost: true)
+        let identity: (pid: pid_t?, bundleId: String?)
+        if let override = recoveryIdentityForTesting {
+            identity = override()
+        } else {
+            let frontApp = NSWorkspace.shared.frontmostApplication
+            identity = (frontApp?.processIdentifier, frontApp?.bundleIdentifier)
+        }
+        logRecoveryApply(pass, expected: expected, report: report, identity: identity)
+        // Observer signatures may describe autocomplete, not the app's focused editor.
+        let current = recoveryFreshness
+        let verdict = CaretRecoveryFreshness.applyIfCurrent(report: report, expected: expected,
+            current: current, expectedPID: pass.appPID, currentPID: identity.pid,
+            expectedBundleId: pass.appBundleId, currentBundleId: identity.bundleId) {
+            let outcome = handler.recoverCaretWord($0, nativeBackspaceProof: pass.isBackspaceProof)
+            onLogEvent?("Caret recovery outcome: \(outcome)")
+        }
+        if verdict == .staleRevision {
+            retryStaleCaretRecovery(pass, current: current)
+        }
+    }
+
+    private func retryStaleCaretRecovery(_ pass: PendingAXPass, current: CaretRecoveryFreshness) {
+        guard let oldRevision = pass.recoveryRevision, !pass.isBackspaceProof, backspaceProofToken == nil,
+              let pid = pass.appPID else { return }
+        let engine = handler.engine
+        guard !engine.bufferDesyncDetected,
+              engine.cursorMovedSinceReset || engine.focusChangedDuringTyping else { return }
+        let attempt = pass.recoveryRetryCount + 1
+        guard attempt <= 3 else {
+            onLogEvent?("Caret recovery retry skipped: staleRevision cap=3 oldRevision=\(oldRevision) " +
+                        "currentRevision=\(current.revision)")
+            return
+        }
+        onLogEvent?("Caret recovery retry staleRevision attempt=\(attempt)/3 oldRevision=\(oldRevision) " +
+                    "currentRevision=\(current.revision)")
+        scheduleCaretRecovery(freshness: current, recoveryRetryCount: attempt,
+                              proofAnchor: (pid, pass.appBundleId))
     }
 
     private func logRecoveryRead(_ pass: PendingAXPass, focusedInfo: AppBehaviorDetector.FocusedElementInfo,
@@ -866,15 +900,15 @@ final class TapEventSource {
     }
 
     private func logRecoveryApply(_ pass: PendingAXPass, expected: CaretRecoveryFreshness,
-                                  report: CaretWordReport?, frontApp: NSRunningApplication?) {
+                                  report: CaretWordReport?, identity: (pid: pid_t?, bundleId: String?)) {
         if pass.recoveryRevision != nil {
             let current = recoveryFreshness
             if report == nil {
                 onLogEvent?("Caret recovery apply: nil report (unreadable)")
             } else if !expected.matches(current) || pass.appPID == nil ||
-                        pass.appPID != frontApp?.processIdentifier || pass.appBundleId != frontApp?.bundleIdentifier {
-                let pidMatch = pass.appPID != nil && pass.appPID == frontApp?.processIdentifier
-                let bundleMatch = pass.appBundleId == frontApp?.bundleIdentifier
+                        pass.appPID != identity.pid || pass.appBundleId != identity.bundleId {
+                let pidMatch = pass.appPID != nil && pass.appPID == identity.pid
+                let bundleMatch = pass.appBundleId == identity.bundleId
                 onLogEvent?("Caret recovery apply rejected: stale/owner " +
                             "expected=\(describeFreshness(expected)) current=\(describeFreshness(current)) " +
                             "pidMatch=\(pidMatch) bundleMatch=\(bundleMatch)")
@@ -1114,23 +1148,30 @@ final class TapEventSource {
             "running=\(freshness.isRunning),active=\(freshness.isActiveHost)"
     }
 
-    private func scheduleCaretRecovery(freshness: CaretRecoveryFreshness) {
+    private func scheduleCaretRecovery(freshness: CaretRecoveryFreshness, recoveryRetryCount: Int = 0,
+                                       proofAnchor: (pid: pid_t, bundleId: String?)? = nil) {
         guard freshness.matches(recoveryFreshness) else {
             onLogEvent?("Caret recovery not scheduled: stale expected=\(describeFreshness(freshness)) " +
                         "current=\(describeFreshness(recoveryFreshness))")
             return
         }
         guard pendingAXPass == nil, !axPassInFlight else {
-            onLogEvent?("Caret recovery not scheduled: busy pending=\(pendingAXPass != nil) " +
-                        "inFlight=\(axPassInFlight) \(describeFreshness(freshness))")
+            onLogEvent?("Caret recovery not scheduled: busy retry=\(recoveryRetryCount)/3 " +
+                        "pending=\(pendingAXPass != nil) inFlight=\(axPassInFlight) \(describeFreshness(freshness))")
             return
         }
         guard recoveryEligibilityForTesting?() ?? handler.canRecoverCaretWord else {
             onLogEvent?("Caret recovery not scheduled: ineligible context \(describeFreshness(freshness))")
             return
         }
-        scheduleAXPass(element: nil, recoveryRevision: freshness.revision) { _, _ in }
+        scheduleAXPass(element: nil, recoveryRevision: freshness.revision, proofAnchor: proofAnchor,
+                       recoveryRetryCount: recoveryRetryCount) { _, _ in }
         onRecoveryScheduledForTesting?(freshness.revision)
+    }
+
+    func scheduleCaretRecoveryForTesting(pid: pid_t, bundleId: String?) {
+        isRunning = true
+        scheduleCaretRecovery(freshness: recoveryFreshness, proofAnchor: (pid, bundleId))
     }
 
     /// Main-thread stage of the focus check.

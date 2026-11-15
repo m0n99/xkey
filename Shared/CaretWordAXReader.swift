@@ -1,5 +1,9 @@
 import Cocoa
 
+enum CaretRecoveryApplyVerdict: Equatable {
+    case applied, missingReport, invalidContext, staleRevision
+}
+
 struct CaretRecoveryFreshness: Equatable {
     let revision: UInt64
     let epoch: UInt64
@@ -18,15 +22,22 @@ struct CaretRecoveryFreshness: Equatable {
             revision == current.revision && epoch == current.epoch && generation == current.generation
     }
 
+    @discardableResult
     static func applyIfCurrent(report: CaretWordReport?, expected: CaretRecoveryFreshness,
                                current: CaretRecoveryFreshness,
                                expectedPID: pid_t?, currentPID: pid_t?,
                                expectedBundleId: String?, currentBundleId: String?,
-                               apply: (CaretWordReport) -> Void) {
-        guard let report = report, let expectedPID = expectedPID,
-              expected.matches(current), expectedPID == currentPID,
-              expectedBundleId == currentBundleId else { return }
+                               apply: (CaretWordReport) -> Void) -> CaretRecoveryApplyVerdict {
+        guard let report = report else { return .missingReport }
+        guard let expectedPID = expectedPID, expected.isRunning, expected.isActiveHost,
+              current.isRunning, current.isActiveHost, expected.epoch == current.epoch,
+              expected.generation == current.generation, expectedPID == currentPID,
+              expectedBundleId == currentBundleId else { return .invalidContext }
+        guard current.revision == expected.revision else {
+            return current.revision > expected.revision ? .staleRevision : .invalidContext
+        }
         apply(report)
+        return .applied
     }
 
     static func afterBookkeeping(expected: CaretRecoveryFreshness,

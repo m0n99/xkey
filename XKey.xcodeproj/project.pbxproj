@@ -90,6 +90,7 @@
 		WTRES00001 /* WindowTitleResolutionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WTRES00002 /* WindowTitleResolutionTests.swift */; };
 		AXOFFM0001 /* AXPassOffMainThreadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AXOFFM0002 /* AXPassOffMainThreadTests.swift */; };
 		BSPRF00001 /* BackspaceProofSchedulingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BSPRF00002 /* BackspaceProofSchedulingTests.swift */; };
+		CA7E00000000000000000001 /* CaretRecoveryRetryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7E00000000000000000002 /* CaretRecoveryRetryTests.swift */; };
 		CARETAX002 /* CaretWordAXReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARETAX001 /* CaretWordAXReader.swift */; };
 		CARETAX003 /* CaretWordAXReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARETAX001 /* CaretWordAXReader.swift */; };
 		B10A5E000000000000000002 /* SharedBrowserRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10A5E000000000000000001 /* SharedBrowserRegistry.swift */; };
@@ -308,6 +309,7 @@
 		WTRES00002 /* WindowTitleResolutionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WindowTitleResolutionTests.swift; sourceTree = "<group>"; };
 		AXOFFM0002 /* AXPassOffMainThreadTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AXPassOffMainThreadTests.swift; sourceTree = "<group>"; };
 		BSPRF00002 /* BackspaceProofSchedulingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BackspaceProofSchedulingTests.swift; sourceTree = "<group>"; };
+		CA7E00000000000000000002 /* CaretRecoveryRetryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaretRecoveryRetryTests.swift; sourceTree = "<group>"; };
 		CARETAX001 /* CaretWordAXReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaretWordAXReader.swift; sourceTree = "<group>"; };
 		B10A5E000000000000000001 /* SharedBrowserRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedBrowserRegistry.swift; sourceTree = "<group>"; };
 		B10A5E000000000000000004 /* BrowserProfilesSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserProfilesSection.swift; sourceTree = "<group>"; };
@@ -736,6 +738,7 @@
 				WTRES00002 /* WindowTitleResolutionTests.swift */,
 				AXOFFM0002 /* AXPassOffMainThreadTests.swift */,
 				BSPRF00002 /* BackspaceProofSchedulingTests.swift */,
+				CA7E00000000000000000002 /* CaretRecoveryRetryTests.swift */,
 				CARETTT001 /* CaretRecoveryTransportTests.swift */,
 				CARETET001 /* CaretWordRecoveryTests.swift */,
 				APPPOL00004 /* AppPolicyRuntimeTests.swift */,
@@ -1123,6 +1126,7 @@
 				WTRES00001 /* WindowTitleResolutionTests.swift in Sources */,
 				AXOFFM0001 /* AXPassOffMainThreadTests.swift in Sources */,
 				BSPRF00001 /* BackspaceProofSchedulingTests.swift in Sources */,
+				CA7E00000000000000000001 /* CaretRecoveryRetryTests.swift in Sources */,
 				CARETTT002 /* CaretRecoveryTransportTests.swift in Sources */,
 				CARETET002 /* CaretWordRecoveryTests.swift in Sources */,
 				APPPOL00005 /* AppPolicyRuntimeTests.swift in Sources */,
