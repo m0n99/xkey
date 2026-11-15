@@ -47,12 +47,21 @@ struct CaretWordAXReader {
         let role: String?
         let description: String?
         let domClassList: [String]?
+        let profile: ResolvedBrowserProfile?
+
+        init(role: String?, description: String?, domClassList: [String]?,
+             profile: ResolvedBrowserProfile? = nil) {
+            self.role = role
+            self.description = description
+            self.domClassList = domClassList
+            self.profile = profile
+        }
 
         var isNativeOmnibox: Bool {
-            guard role == "AXTextField", let description = description?.lowercased(),
-                  description.contains("address"), description.contains("search"),
-                  let classes = domClassList else { return false }
-            return classes.contains("OmniboxViewViews") || classes.contains("BraveOmniboxViewViews")
+            guard role == "AXTextField", let profile = profile, profile.kind.supportsSelectedSuffix,
+                  let description = description, !description.isEmpty,
+                  profile.exactDescriptions.contains(description), let classes = domClassList else { return false }
+            return classes.contains { !$0.isEmpty && profile.domClasses.contains($0) }
         }
     }
 

@@ -83,6 +83,7 @@ extension TapEnvironment {
         detector.overlayAppNameProvider = overlayAppName
         detector.remoteDesktopInjectModeProvider = remoteDesktopInjectMode
         detector.windowTitleRulesEnabled = runtimePreferences.windowTitleRulesEnabled
+        SharedBrowserRegistry.shared.reload()
         detector.loadCustomRules()
 
         handler.prefersAsyncDirectInjection = prefersAsyncDirectInjection

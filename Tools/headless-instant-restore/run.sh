@@ -3,6 +3,7 @@ set -eu
 cd "$(dirname "$0")/../.."
 mkdir -p build/headless-instant-restore
 swiftc \
+    Shared/SharedBrowserRegistry.swift \
     Shared/InputSession/CaretWordRecovery.swift \
     Shared/CaretWordAXReader.swift \
     XKey/Core/Models/VNCharacter.swift \

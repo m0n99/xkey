@@ -819,6 +819,26 @@ class AppBehaviorDetector {
     // MARK: - Singleton
     
     static let shared = AppBehaviorDetector()
+
+    private var browserRegistryObserver: NSObjectProtocol?
+
+    init() {
+        browserRegistryObserver = NotificationCenter.default.addObserver(
+            forName: SharedBrowserRegistry.didReloadNotification, object: SharedBrowserRegistry.shared, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.clearCache()
+            self.clearConfirmedInjectionMethod()
+            self.clearInjectionMethodFallback()
+            self.clearAddressBarCache()
+        }
+    }
+
+    deinit {
+        if let browserRegistryObserver {
+            NotificationCenter.default.removeObserver(browserRegistryObserver)
+        }
+    }
     
     // MARK: - Dependency Injection
     
@@ -1161,9 +1181,7 @@ class AppBehaviorDetector {
     /// the frontmost application, which no test can choose, and what the schedule asks for
     /// is only observable past the gate.
     static func isReprobeBrowser(_ bundleId: String) -> Bool {
-        return browserApps.contains(bundleId)
-            || firefoxBasedBrowsers.contains(bundleId)
-            || axAttributeDetectForBrowsers.contains(bundleId)
+        return SharedBrowserRegistry.shared.profile(for: bundleId) != nil
     }
 
     /// The reprobe itself, past the browser gate.
@@ -1344,71 +1362,6 @@ class AppBehaviorDetector {
     /// All terminals use the same config
     static let terminalDelays: InjectionDelays = (8000, 25000, 8000)
     
-    /// Browser apps
-    static let browserApps: Set<String> = [
-        // Chromium-based
-        "com.google.Chrome",
-        "com.google.Chrome.canary",
-        "com.google.Chrome.beta",
-        "org.chromium.Chromium",
-        "com.brave.Browser",
-        "com.brave.Browser.beta",
-        "com.brave.Browser.nightly",
-        "com.microsoft.edgemac",
-        "com.microsoft.edgemac.Beta",
-        "com.microsoft.edgemac.Dev",
-        "com.microsoft.edgemac.Canary",
-        "com.vivaldi.Vivaldi",
-        "com.vivaldi.Vivaldi.snapshot",
-        "ru.yandex.desktop.yandex-browser",
-        // Opera
-        "com.opera.Opera",
-        "com.operasoftware.Opera",
-        "com.operasoftware.OperaGX",
-        "com.operasoftware.OperaAir",
-        "com.opera.OperaNext",
-        // Safari
-        "com.apple.Safari",
-        "com.apple.SafariTechnologyPreview",
-        // WebKit-based
-        "com.kagi.kagimacOS",
-        // Arc & Others
-        "company.thebrowser.Browser",
-        "company.thebrowser.Arc",
-        "company.thebrowser.dia",
-        "com.sigmaos.sigmaos.macos",
-        "com.pushplaylabs.sidekick",
-        "com.firstversionist.polypane",
-        "ai.perplexity.comet",
-        "com.duckduckgo.macos.browser",
-        "com.openai.atlas",
-        // Helium (Chromium-based)
-        "net.imput.helium"
-    ]
-
-    /// Firefox-based browsers - need special handling for content area
-    /// Address bar (AXTextField): use selection method
-    /// Content area (AXWindow): use axDirect method (AX API to set text directly)
-    /// Note: Selection method in content area interferes with mouse word selection
-    static let firefoxBasedBrowsers: Set<String> = [
-        "org.mozilla.firefox",
-        "org.mozilla.firefoxdeveloperedition",
-        "org.mozilla.nightly",
-        "org.waterfoxproject.waterfox",
-        "io.gitlab.librewolf-community.librewolf",
-        "one.ablaze.floorp",
-        "org.torproject.torbrowser",
-        "net.mullvad.mullvadbrowser"
-    ]
-
-    /// Browsers that need AX attribute-based detection for address bar
-    /// These browsers have non-standard address bar detection (not AXTextField/AXComboBox)
-    /// Address bar is detected via AX Description regex pattern: "Search with xx or enter address"
-    static let axAttributeDetectForBrowsers: Set<String> = [
-        "app.zen-browser.zen"  // Zen Browser
-        // Add more similar browsers
-    ]
-
     /// Code editors (Electron-based or native)
     static let codeEditors: Set<String> = [
         // VSCode and variants
@@ -1873,38 +1826,14 @@ class AppBehaviorDetector {
     /// 2. AX Description Pattern: "Search with <search_engine> or enter address"
     /// - Returns: true if focused element is a Zen-style address bar
     func isFirefoxStyleAddressBar(info: FocusedElementInfo) -> Bool {
-        
-        // Check eager attributes first — AXDOMIdentifier is a lazy renderer query now,
-        // so the free checks must run before it.
-        // AXIdentifier (for compatibility)
-        if let identifier = info.identifier, identifier == "urlbar-input" {
-            return true
-        }
-
-        // AX Description pattern: "Search with <anything> or enter address"
-        if let desc = info.description,
-           desc.range(of: "^Search with .+ or enter address$", options: .regularExpression) != nil {
-            return true
-        }
-
-        // DOM ID (most reliable for Firefox-based browsers — Firefox stores the DOM
-        // element ID in AXDOMIdentifier, not AXIdentifier; needed when the AX
-        // description is localized). The urlbar is a native-chrome text field
-        // (AXTextField), so gate by role: web-content elements are never the
-        // urlbar, and skipping them avoids firing the lazy renderer query.
-        if info.role == "AXTextField", let domId = info.domIdentifier, domId == "urlbar-input" {
-            return true
-        }
-
-        return false
+        return matchesAddressBar(info: info, profile: BrowserProfilePresets.resolve(.firefox))
     }
     
     /// Check if focused element is Safari's address bar
     /// Detection via AX Identifier: "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD"
     /// - Returns: true if focused element is Safari's address bar
     func isSafariAddressBar(info: FocusedElementInfo) -> Bool {
-        guard let identifier = info.identifier else { return false }
-        return identifier == "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD"
+        return matchesAddressBar(info: info, profile: BrowserProfilePresets.resolve(.safari))
     }
     
     /// Check if focused element is Chromium-based browser's address bar (Chrome, Edge, Brave, Opera, etc.)
@@ -1913,31 +1842,21 @@ class AppBehaviorDetector {
     /// 2. AX DOM Classes: contains "OmniboxViewViews", "BraveOmniboxViewViews", or "AddressTextfieldView" (Opera)
     /// - Returns: true if focused element is Chromium's address bar (Omnibox)
     func isChromiumAddressBar(info: FocusedElementInfo) -> Bool {
-        
-        // Check AX Description
-        // Chrome/Edge/Brave: "Address and search bar"
-        // Opera: "Address field"
-        if let desc = info.description {
-            if desc == "Address and search bar" || desc == "Address field" {
-                return true
-            }
-        }
-        
-        // Check DOM Classes for OmniboxViewViews (Chrome, Edge, etc.)
-        // or BraveOmniboxViewViews (Brave Browser)
-        // or AddressTextfieldView (Opera)
-        // Needed when the AX description is localized (non-English browser UI).
-        // The omnibox is a native Views control exposed as AXTextField, so gate
-        // by role: web-content elements (AXTextArea/AXWebArea/AXGroup) are never
-        // the omnibox, and skipping them avoids firing the lazy AXDOMClassList
-        // renderer query (Gmail freeze).
-        if info.role == "AXTextField", let domClasses = info.domClasses {
-            if domClasses.contains("OmniboxViewViews") || domClasses.contains("BraveOmniboxViewViews")
-                || domClasses.contains("AddressTextfieldView") {
-                return true
-            }
-        }
+        return matchesAddressBar(info: info, profile: BrowserProfilePresets.resolve(.chromium))
+    }
 
+    private func matchesAddressBar(info: FocusedElementInfo, profile: ResolvedBrowserProfile) -> Bool {
+        if let identifier = profile.identifier, info.identifier == identifier { return true }
+        if let description = info.description {
+            if profile.exactDescriptions.contains(description) { return true }
+            if let pattern = profile.firefoxDescriptionPattern,
+               description.range(of: pattern, options: .regularExpression) != nil { return true }
+        }
+        guard info.role == "AXTextField" else { return false }
+        if profile.kind == .firefox || profile.kind == .firefoxAx,
+           let identifier = profile.identifier, info.domIdentifier == identifier { return true }
+        if !profile.domClasses.isEmpty, let classes = info.domClasses,
+           profile.domClasses.contains(where: classes.contains) { return true }
         return false
     }
     /// Check if the current context is Opera's Speed Dial page with degraded AX info.
@@ -1953,11 +1872,9 @@ class AppBehaviorDetector {
     /// no focused element, which is exactly why `getFocusedElementInfo()` returns a
     /// `withoutFocusedElement()` snapshot rather than `empty`: it carries no element
     /// attributes but can still resolve the title this check needs.
-    private func isOperaSpeedDialAddressBar(bundleId: String, role: String?, focusedInfo: FocusedElementInfo?) -> Bool {
-        // 1. Cheapest: Must be Opera (string prefix check)
-        guard bundleId.hasPrefix("com.opera.") || bundleId.hasPrefix("com.operasoftware.") else {
-            return false
-        }
+    private func isOperaSpeedDialAddressBar(profile: ResolvedBrowserProfile, role: String?,
+                                            focusedInfo: FocusedElementInfo?) -> Bool {
+        guard profile.kind == .opera else { return false }
 
         // 2. Cheap: AXRole must be nil or Unknown (degraded/no focused element)
         if let role = role, role != "AXUnknown" && role != "Unknown" {
@@ -1995,10 +1912,9 @@ class AppBehaviorDetector {
     /// Detection via AX Identifier: "commandBarTextField"
     /// - Returns: true if focused element is Arc or Dia's address bar
     func isArcOrDiaAddressBar(info: FocusedElementInfo, bundleId: String) -> Bool {
-        guard bundleId == "company.thebrowser.Browser" || bundleId == "company.thebrowser.Arc"
-            || bundleId == "company.thebrowser.dia" else { return false }
-        guard let identifier = info.identifier else { return false }
-        return identifier == "commandBarTextField"
+        guard let profile = SharedBrowserRegistry.shared.profile(for: bundleId),
+              profile.kind == .commandBar || profile.kind == .commandBarAx else { return false }
+        return matchesAddressBar(info: info, profile: profile)
     }
     
     /// Check if focused element is a Terminal panel in VSCode/Cursor/etc
@@ -2030,26 +1946,13 @@ class AppBehaviorDetector {
     /// dispatch in `detectInjectionMethod` so all paths stay in sync.
     /// - Returns: true iff focused element is a known browser address bar.
     func isAddressBar(info: FocusedElementInfo, bundleId: String) -> Bool {
-        let isBrowserApp = Self.browserApps.contains(bundleId)
-            || Self.firefoxBasedBrowsers.contains(bundleId)
-            || Self.axAttributeDetectForBrowsers.contains(bundleId)
-        guard isBrowserApp else { return false }
+        guard let profile = SharedBrowserRegistry.shared.profile(for: bundleId) else { return false }
+        return isAddressBar(info: info, profile: profile)
+    }
 
-        // Safari: AX Identifier — early return prevents cross-browser false positives
-        if bundleId == "com.apple.Safari" || bundleId == "com.apple.SafariTechnologyPreview" {
-            return isSafariAddressBar(info: info)
-        }
-
-        // Firefox-style (Firefox family + Zen): DOM ID / AX Description
-        if Self.firefoxBasedBrowsers.contains(bundleId) || Self.axAttributeDetectForBrowsers.contains(bundleId) {
-            return isFirefoxStyleAddressBar(info: info)
-        }
-
-        // Chromium-based (Chrome, Edge, Brave, Opera, Vivaldi, Arc, ...)
-        if isChromiumAddressBar(info: info) { return true }
-        if isOperaSpeedDialAddressBar(bundleId: bundleId, role: info.role, focusedInfo: info) { return true }
-        if isArcOrDiaAddressBar(info: info, bundleId: bundleId) { return true }
-        return false
+    private func isAddressBar(info: FocusedElementInfo, profile: ResolvedBrowserProfile) -> Bool {
+        return matchesAddressBar(info: info, profile: profile)
+            || isOperaSpeedDialAddressBar(profile: profile, role: info.role, focusedInfo: info)
     }
 
     /// Check if the focused input is a browser address bar (URL bar).
@@ -2071,10 +1974,7 @@ class AppBehaviorDetector {
 
         // Cheap browser-app gate — avoids a wasted AX query for non-browser apps,
         // which would otherwise cost 6+ AX attribute reads via getFocusedElementInfo().
-        let isBrowserApp = Self.browserApps.contains(bundleId)
-            || Self.firefoxBasedBrowsers.contains(bundleId)
-            || Self.axAttributeDetectForBrowsers.contains(bundleId)
-        guard isBrowserApp else { return false }
+        guard let profile = SharedBrowserRegistry.shared.profile(for: bundleId) else { return false }
 
         // Cached address bar context (Chromium/Firefox/Opera autocomplete pop-ups
         // temporarily shift focus away from the bar — cache persists the state).
@@ -2083,7 +1983,7 @@ class AppBehaviorDetector {
            cached.description.contains("Address Bar") {
             return true
         }
-        return isAddressBar(info: getFocusedElementInfo(), bundleId: bundleId)
+        return isAddressBar(info: getFocusedElementInfo(), profile: profile)
     }
     
     // MARK: - Window Title Detection
@@ -2574,11 +2474,8 @@ class AppBehaviorDetector {
         
         // Browser apps: address bar vs content area dispatch via canonical helper.
         // Shared with isInBrowserAddressBar() so all callers see the same answer.
-        let isBrowserApp = Self.browserApps.contains(bundleId)
-            || Self.firefoxBasedBrowsers.contains(bundleId)
-            || Self.axAttributeDetectForBrowsers.contains(bundleId)
-        if isBrowserApp {
-            return isAddressBar(info: focusedInfo, bundleId: bundleId) ? .browserAddressBar : .standard
+        if let profile = SharedBrowserRegistry.shared.profile(for: bundleId) {
+            return isAddressBar(info: focusedInfo, profile: profile) ? .browserAddressBar : .standard
         }
         
         // Code editors
@@ -2865,13 +2762,11 @@ class AppBehaviorDetector {
         // - But clicked on address bar (focused element = Omnibox/AXTextField)
         // - Address bar needs different injection method than Google Docs content
         // Note: Passthrough rules are already handled above at Priority 0.45
-        let isBrowserApp = Self.browserApps.contains(bundleId)
-            || Self.firefoxBasedBrowsers.contains(bundleId)
-            || Self.axAttributeDetectForBrowsers.contains(bundleId)
-        
-        if isBrowserApp {
+        let browserProfile = SharedBrowserRegistry.shared.profile(for: bundleId)
+
+        if let profile = browserProfile {
             // Safari address bar (+ Safari "type-ahead")
-            if bundleId == "com.apple.Safari" || bundleId == "com.apple.SafariTechnologyPreview" {
+            if profile.kind == .safari {
                 // Two ways the address bar receives keystrokes:
                 // 1. Explicit focus: user clicked the URL field →
                 //    AX identifier == WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD.
@@ -2887,7 +2782,7 @@ class AppBehaviorDetector {
                 // autocomplete suggestion, then the extra backspace removes it, so the typed
                 // char is deleted correctly (fixes "caau" → "caâu"). Avoids the Shift+Left
                 // (.selection) race conditions that browser autocomplete is prone to.
-                let isExplicitAddressBar = isSafariAddressBar(info: focusedInfo)
+                let isExplicitAddressBar = matchesAddressBar(info: focusedInfo, profile: profile)
                 let role = focusedInfo.role
                 let isDegradedOrStartPageRole = role == nil
                     || role == "AXWindow"
@@ -2908,19 +2803,21 @@ class AppBehaviorDetector {
             // Chromium address bar (Chrome, Edge, Brave, etc.)
             // Use .fast + emptyCharPrefix to break autocomplete
             // Selection method (Shift+Left) causes race conditions with browser autocomplete
-            if isChromiumAddressBar(info: focusedInfo) {
+            if profile.kind == .chromium || profile.kind == .opera,
+               matchesAddressBar(info: focusedInfo, profile: profile) {
                 return makeAddressBarInjection(browserType: "Chromium", bundleId: bundleId)
             }
             
             // Opera Speed Dial: AX returns Unknown role for address bar
             // Treat same as Chromium address bar
-            if isOperaSpeedDialAddressBar(bundleId: bundleId, role: currentRole, focusedInfo: focusedInfo) {
+            if isOperaSpeedDialAddressBar(profile: profile, role: currentRole, focusedInfo: focusedInfo) {
                 return makeAddressBarInjection(browserType: "Opera Speed Dial", bundleId: bundleId)
             }
             
             // Arc and Dia Browser address bar (AX Identifier: commandBarTextField)
-            if isArcOrDiaAddressBar(info: focusedInfo, bundleId: bundleId) {
-                if bundleId != "company.thebrowser.dia" {
+            if profile.kind == .commandBar || profile.kind == .commandBarAx,
+               matchesAddressBar(info: focusedInfo, profile: profile) {
+                if profile.kind == .commandBar {
                     return makeAddressBarInjection(browserType: "Arc", bundleId: bundleId)
                 }
                 return InjectionMethodInfo(
@@ -2933,7 +2830,7 @@ class AppBehaviorDetector {
             
             // Firefox-based browsers address bar (AXDOMIdentifier: "urlbar-input")
             // Use .fast + emptyCharPrefix to break autocomplete
-            if Self.firefoxBasedBrowsers.contains(bundleId) && isFirefoxStyleAddressBar(info: focusedInfo) {
+            if profile.kind == .firefox && matchesAddressBar(info: focusedInfo, profile: profile) {
                 return makeAddressBarInjection(browserType: "Firefox", bundleId: bundleId)
             }
             
@@ -3037,8 +2934,9 @@ class AppBehaviorDetector {
         // Browsers with AX attribute-based address bar detection (Zen-like)
         // Address bar detected via AX Description: "Search with xx or enter address"
         // Only use axDirect for address bar, content area uses default fast method
-        if Self.axAttributeDetectForBrowsers.contains(bundleId) {
-            if isFirefoxStyleAddressBar(info: info) {
+        let profile = SharedBrowserRegistry.shared.profile(for: bundleId)
+        if let profile = profile, profile.kind == .firefoxAx {
+            if matchesAddressBar(info: info, profile: profile) {
                 return InjectionMethodInfo(
                     method: .axDirect,
                     delays: InjectionMethod.axDirect.defaultDelays,
@@ -3067,7 +2965,7 @@ class AppBehaviorDetector {
         // artifacts like "goõ" instead of "gõ". .fast + U+202F is safe in both surfaces:
         // - Address bar: U+202F breaks autocomplete → extra backspace removes it → works ✅
         // - Content area: U+202F is invisible → extra backspace removes it → works ✅
-        if Self.browserApps.contains(bundleId) || Self.firefoxBasedBrowsers.contains(bundleId) {
+        if profile != nil {
             let isDegradedAX = role == nil || role == "Unknown" || role == "AXUnknown" || role == "AXWindow"
             if isDegradedAX {
                 return InjectionMethodInfo(
@@ -3161,9 +3059,7 @@ extension AppBehaviorDetector {
     /// Check if current app is a browser
     var isBrowser: Bool {
         guard let bundleId = getCurrentBundleId() else { return false }
-        return Self.browserApps.contains(bundleId)
-            || Self.firefoxBasedBrowsers.contains(bundleId)
-            || Self.axAttributeDetectForBrowsers.contains(bundleId)
+        return SharedBrowserRegistry.shared.profile(for: bundleId) != nil
     }
     
     

@@ -229,6 +229,60 @@ final class BackspaceProofSchedulingTests: XCTestCase {
 }
 
 extension BackspaceProofSchedulingTests {
+    func testRegistryChangeCancelsPendingProofAndInvalidatesSelectedOwnership() {
+        let handler = KeyboardEventHandler()
+        let source = TapEventSource(handler: handler, isActiveHost: { true })
+        source.startBackspaceProofForTesting(pid: 42, bundleId: "app")
+        defer { source.stopBackspaceProofForTesting() }
+        type("o", handler: handler)
+        var report = CaretWordReport(word: "o", caretAtWordEnd: true, selectionAnchoredAtCaret: false,
+                                     selectionLength: 3, elementSignature: "field", appBundleId: "app",
+                                     expectedRevision: handler.typingRevision)
+        report.proofKind = .selectedSuffixReplacement(selectionLength: 3)
+        XCTAssertEqual(handler.engine.recoverCaretWord(report), .validated)
+        XCTAssertTrue(handler.engine.selectionProofActive)
+        handler.engine.bufferDesyncDetected = true
+        handler.onNativeBackspacePassedThrough?()
+        XCTAssertTrue(source.hasPendingBackspaceProofForTesting)
+
+        source.handleBrowserRegistryReload()
+
+        XCTAssertFalse(source.hasPendingBackspaceProofForTesting)
+        XCTAssertFalse(handler.engine.selectionProofActive)
+        XCTAssertTrue(handler.engine.bufferDesyncDetected)
+        handler.onNativeBackspacePassedThrough?()
+        XCTAssertTrue(source.hasPendingBackspaceProofForTesting, "registry reload preserves cached identity")
+    }
+
+    func testRegistryChangeRejectsInFlightProofWithoutAXReads() {
+        let handler = BackspaceProofHandler()
+        let source = TapEventSource(handler: handler, isActiveHost: { true })
+        source.startBackspaceProofForTesting(pid: 42, bundleId: "app")
+        defer { source.stopBackspaceProofForTesting() }
+        source.backspaceProofIdentityForTesting = { (42, "app") }
+        source.recoveryEligibilityForTesting = { true }
+        let entered = expectation(description: "proof read entered")
+        let rejected = expectation(description: "old proof rejected")
+        let release = DispatchSemaphore(value: 0)
+        source.axPassReadForTesting = { generation, revision, _ in
+            entered.fulfill()
+            _ = release.wait(timeout: .now() + 5)
+            return (self.snapshot(generation), self.proofReport("", revision: revision!, atStart: true, empty: true))
+        }
+        handler.onProof = { _, _ in XCTFail("registry change must reject old proof") }
+        source.onLogEvent = { message in
+            if message.hasPrefix("Caret recovery apply rejected: stale generation") { rejected.fulfill() }
+        }
+        _ = handler.engine.processBackspace()
+        handler.onNativeBackspacePassedThrough?()
+        source.settleBackspaceProofForTesting()
+        wait(for: [entered], timeout: 5)
+        source.handleBrowserRegistryReload()
+        release.signal()
+        wait(for: [rejected], timeout: 5)
+        XCTAssertTrue(handler.engine.needsBackspaceContextProof)
+    }
+
     func testOldDeactivationPreservesNewIdentityAndQueuedProof() {
         let handler = KeyboardEventHandler()
         let source = TapEventSource(handler: handler, isActiveHost: { true })

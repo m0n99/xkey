@@ -8,6 +8,8 @@ final class SharedSettings {
     var restoreIfWrongSpelling = true
     var instantRestoreOnWrongSpelling = true
     var modernStyle = true
+    func getBrowserProfilesData() -> Data? { fatalError("Unexpected browser preferences read") }
+    func setBrowserProfilesData(_ data: Data) -> Bool { fatalError("Unexpected browser preferences write") }
     func isWordInUserDictionary(_ word: String) -> Bool { fatalError("Unexpected dictionary access") }
 }
 

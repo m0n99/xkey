@@ -289,6 +289,11 @@ struct AdvancedSection: View {
                     }
                 }
 
+                // Browser registry (shared by injection and AX native proof)
+                if #available(macOS 13.0, *) {
+                    BrowserProfilesSection()
+                }
+
                 SettingsGroup(title: "Remote Desktop") {
                     VStack(alignment: .leading, spacing: 10) {
                         Toggle("Remote Session Tap",

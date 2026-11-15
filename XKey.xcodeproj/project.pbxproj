@@ -92,6 +92,10 @@
 		BSPRF00001 /* BackspaceProofSchedulingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BSPRF00002 /* BackspaceProofSchedulingTests.swift */; };
 		CARETAX002 /* CaretWordAXReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARETAX001 /* CaretWordAXReader.swift */; };
 		CARETAX003 /* CaretWordAXReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARETAX001 /* CaretWordAXReader.swift */; };
+		B10A5E000000000000000002 /* SharedBrowserRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10A5E000000000000000001 /* SharedBrowserRegistry.swift */; };
+		B10A5E000000000000000003 /* SharedBrowserRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10A5E000000000000000001 /* SharedBrowserRegistry.swift */; };
+		B10A5E000000000000000005 /* BrowserProfilesSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10A5E000000000000000004 /* BrowserProfilesSection.swift */; };
+		B10A5E000000000000000007 /* BrowserProfileEditorSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10A5E000000000000000006 /* BrowserProfileEditorSheet.swift */; };
 		CARETCO002 /* CaretWordRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARETCO001 /* CaretWordRecovery.swift */; };
 		CARETCO003 /* CaretWordRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARETCO001 /* CaretWordRecovery.swift */; };
 		CARETTT002 /* CaretRecoveryTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARETTT001 /* CaretRecoveryTransportTests.swift */; };
@@ -305,6 +309,9 @@
 		AXOFFM0002 /* AXPassOffMainThreadTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AXPassOffMainThreadTests.swift; sourceTree = "<group>"; };
 		BSPRF00002 /* BackspaceProofSchedulingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BackspaceProofSchedulingTests.swift; sourceTree = "<group>"; };
 		CARETAX001 /* CaretWordAXReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaretWordAXReader.swift; sourceTree = "<group>"; };
+		B10A5E000000000000000001 /* SharedBrowserRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedBrowserRegistry.swift; sourceTree = "<group>"; };
+		B10A5E000000000000000004 /* BrowserProfilesSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserProfilesSection.swift; sourceTree = "<group>"; };
+		B10A5E000000000000000006 /* BrowserProfileEditorSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserProfileEditorSheet.swift; sourceTree = "<group>"; };
 		CARETCO001 /* CaretWordRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaretWordRecovery.swift; sourceTree = "<group>"; };
 		CARETTT001 /* CaretRecoveryTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaretRecoveryTransportTests.swift; sourceTree = "<group>"; };
 		CARETET001 /* CaretWordRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaretWordRecoveryTests.swift; sourceTree = "<group>"; };
@@ -462,6 +469,8 @@
 				076839C4C1B18C9FC1474F37 /* GeneralSection.swift */,
 				4A2608F3ABD0C3E93C052478 /* QuickTypingSection.swift */,
 				F362794B762A19FE8D883F35 /* AdvancedSection.swift */,
+				B10A5E000000000000000004 /* BrowserProfilesSection.swift */,
+				B10A5E000000000000000006 /* BrowserProfileEditorSheet.swift */,
 				98D22A491FA1C51411B4A156 /* AppearanceSection.swift */,
 				5A414AFDC35C8357A998491D /* AboutSection.swift */,
 				69901F64AACBE0FBAC7C0E0F /* BackupRestoreSection.swift */,
@@ -521,6 +530,7 @@
 				TAPENV0001 /* TapEnvironment.swift */,
 				TAPSRC0001 /* TapEventSource.swift */,
 				CARETAX001 /* CaretWordAXReader.swift */,
+				B10A5E000000000000000001 /* SharedBrowserRegistry.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -937,6 +947,7 @@
 				INPSES00002 /* InputSession.swift in Sources */,
 				CARETCO002 /* CaretWordRecovery.swift in Sources */,
 				CARETAX002 /* CaretWordAXReader.swift in Sources */,
+				B10A5E000000000000000002 /* SharedBrowserRegistry.swift in Sources */,
 				DICTRUNT001 /* DictionaryRuntime.swift in Sources */,
 				SETDEB0001 /* SettingsReloadDebouncer.swift in Sources */,
 				SECDET002 /* SecureInputDetector.swift in Sources */,
@@ -991,6 +1002,7 @@
 				INPSES00003 /* InputSession.swift in Sources */,
 				CARETCO003 /* CaretWordRecovery.swift in Sources */,
 				CARETAX003 /* CaretWordAXReader.swift in Sources */,
+				B10A5E000000000000000003 /* SharedBrowserRegistry.swift in Sources */,
 				DICTRUNT002 /* DictionaryRuntime.swift in Sources */,
 				SETDEB0002 /* SettingsReloadDebouncer.swift in Sources */,
 				SECDET003 /* SecureInputDetector.swift in Sources */,
@@ -1054,6 +1066,8 @@
 				105B938F2F3883C10018DC12 /* FloatingToolbarPositioning.swift in Sources */,
 				CEBF55C134CDBDA34B5E84A8 /* QuickTypingSection.swift in Sources */,
 				C4EDC498282B5B6D76626F6D /* AdvancedSection.swift in Sources */,
+				B10A5E000000000000000005 /* BrowserProfilesSection.swift in Sources */,
+				B10A5E000000000000000007 /* BrowserProfileEditorSheet.swift in Sources */,
 				102986BD2F25317A00B4DEEE /* TranslationLanguage.swift in Sources */,
 				F3F2891E34784154B457BA39 /* AppearanceSection.swift in Sources */,
 				210B156FF24D4357FC34F023 /* AboutSection.swift in Sources */,

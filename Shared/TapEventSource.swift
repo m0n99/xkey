@@ -111,6 +111,7 @@ final class TapEventSource {
 
     private var appSwitchObserver: NSObjectProtocol?
     private var appDeactivateObserver: NSObjectProtocol?
+    private var browserRegistryObserver: NSObjectProtocol?
 
     /// Global monitor for mouse-up events, used to detect focus changes from clicks.
     private var mouseClickMonitor: Any?
@@ -370,6 +371,11 @@ final class TapEventSource {
         let frontApp = NSWorkspace.shared.frontmostApplication
         recordFrontmostApplicationIdentity(pid: frontApp?.processIdentifier, bundleId: frontApp?.bundleIdentifier)
         installBackspaceProofCallback()
+        browserRegistryObserver = NotificationCenter.default.addObserver(
+            forName: SharedBrowserRegistry.didReloadNotification, object: SharedBrowserRegistry.shared, queue: .main
+        ) { [weak self] _ in
+            self?.handleBrowserRegistryReload()
+        }
 
         // Listen for app activation changes to reset engine buffer
         // This prevents buffer from previous app affecting typing in new app
@@ -555,9 +561,32 @@ final class TapEventSource {
         cancelBackspaceProof()
     }
 
+    func handleBrowserRegistryReload() {
+        guard isRunning else { return }
+        recoveryEpoch &+= 1
+        axPassGeneration &+= 1
+        pendingAXPass = nil
+        cancelBackspaceProof()
+        let detector = AppBehaviorDetector.shared
+        detector.clearConfirmedInjectionMethod()
+        detector.clearInjectionMethodFallback()
+        detector.clearAddressBarCache()
+        detector.clearCache()
+        lastFocusedElementSignature = ""
+        lastDetectedTitle = nil
+        onResetLastFocusedElement?()
+        if isActiveHost(), handler.engine.selectionProofActive {
+            handler.engine.invalidateSelectedSuffixProof()
+        }
+    }
+
     func stop() {
         guard isRunning else { return }
         isRunning = false
+        if let observer = browserRegistryObserver {
+            NotificationCenter.default.removeObserver(observer)
+            browserRegistryObserver = nil
+        }
         handler.onNativeBackspacePassedThrough = nil
         cancelBackspaceProof()
         cachedProofPID = nil
@@ -719,9 +748,11 @@ final class TapEventSource {
                     // materialise resolves domClasses for AXTextField above; the role gate
                     // prevents this access from resolving the lazy property for other roles.
                     let canUseOmniboxMetadata = !pass.isBackspaceProof && focusedInfo.role == "AXTextField"
+                    let profile = canUseOmniboxMetadata
+                        ? bundleId.flatMap { SharedBrowserRegistry.shared.profile(for: $0) } : nil
                     let metadata: CaretWordAXReader.OmniboxMetadata? = canUseOmniboxMetadata
                         ? .init(role: focusedInfo.role, description: focusedInfo.description,
-                                domClassList: focusedInfo.domClasses)
+                                domClassList: focusedInfo.domClasses, profile: profile)
                         : nil
                     recoveryReport = CaretWordAXReader.read(CaretWordAXReader.provider(element: element, appElement: appElement),
                                                             signature: focusedInfo.signature, bundleId: bundleId,

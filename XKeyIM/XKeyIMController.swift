@@ -43,6 +43,7 @@ class XKeyIMController: IMKInputController {
         let preferences = runtimePreferences()
         session = InputSession(preferences: preferences)
         AppBehaviorDetector.shared.windowTitleRulesEnabled = preferences.windowTitleRulesEnabled
+        SharedBrowserRegistry.shared.reload()
         AppBehaviorDetector.shared.loadCustomRules()
         refreshDictionary(for: preferences.engineSettings)
         updateEngineLogWiring()
@@ -123,6 +124,7 @@ class XKeyIMController: IMKInputController {
         let preferences = runtimePreferences()
         session.engine.smartSwitchManager.loadFromPlist()
         AppBehaviorDetector.shared.windowTitleRulesEnabled = preferences.windowTitleRulesEnabled
+        SharedBrowserRegistry.shared.reload()
         AppBehaviorDetector.shared.loadCustomRules()
         refreshDictionary(for: preferences.engineSettings)
         session.apply(preferences)

@@ -120,6 +120,7 @@ enum SharedSettingsKey: String {
     // Local data (macros, window title rules)
     case macrosData = "XKey.macrosData"
     case windowTitleRules = "XKey.windowTitleRules"
+    case browserProfiles = "XKey.browserProfiles"
     case disabledBuiltInRules = "XKey.disabledBuiltInRules"        // Rules enabled by default, now disabled by user
     case enabledBuiltInRules = "XKey.enabledBuiltInRules"          // Rules disabled by default, now enabled by user
     
@@ -498,8 +499,9 @@ class SharedSettings {
     /// reverts whatever the other process wrote since that cache was filled — including
     /// the tap-ownership flag, which would put both processes in the keystroke path.
     ///
-    private func mutatePlist(_ body: (inout [String: Any]) -> Void) {
-        guard let url = plistURL else { return }
+    @discardableResult
+    private func mutatePlist(_ body: (inout [String: Any]) -> Void) -> Bool {
+        guard let url = plistURL else { return false }
 
         do {
             cacheLock.lock()
@@ -537,9 +539,11 @@ class SharedSettings {
             cachedPlistDict = dict
             cachedUserDictionaryWords = nil
             cacheGeneration += 1
+            return true
         } catch {
             // Outside the lock hold: the defer above runs on the way out of the do block.
             sharedLogError("Failed to write plist: \(error)")
+            return false
         }
     }
 
@@ -1508,6 +1512,17 @@ class SharedSettings {
         // observers so iCloudSyncManager schedules a push — writeData alone is silent.
         // During sync apply, isBatchUpdating suppresses this to avoid a push echo.
         notifySettingsChanged()
+    }
+
+    func getBrowserProfilesData() -> Data? {
+        readData(forKey: SharedSettingsKey.browserProfiles.rawValue)
+    }
+
+    @discardableResult
+    func setBrowserProfilesData(_ data: Data) -> Bool {
+        guard mutatePlist({ $0[SharedSettingsKey.browserProfiles.rawValue] = data }) else { return false }
+        notifySettingsChanged()
+        return true
     }
     
     // MARK: - Disabled Built-in Rules

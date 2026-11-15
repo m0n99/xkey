@@ -1,7 +1,10 @@
 import Foundation
 
+private let registry = SharedBrowserRegistry()
+private let chromiumProfile = registry.profile(for: "com.google.Chrome")
 private let omnibox = CaretWordAXReader.OmniboxMetadata(
-    role: "AXTextField", description: "Address and search bar", domClassList: ["OmniboxViewViews"])
+    role: "AXTextField", description: "Address and search bar", domClassList: ["OmniboxViewViews"],
+    profile: chromiumProfile)
 
 private func selectedReport(_ word: String, _ engine: VNEngine, length: Int = 3) -> CaretWordReport {
     var result = CaretWordReport(word: word, caretAtWordEnd: true, selectionAnchoredAtCaret: false,
@@ -45,20 +48,45 @@ private func selectedReaderScenarios() {
     let canonical = CFRange(location: 1, length: 3)
     let wrongMetadata: [CaretWordAXReader.OmniboxMetadata?] = [
         nil,
-        .init(role: "AXTextArea", description: "Address and search bar", domClassList: ["OmniboxViewViews"]),
-        .init(role: "AXTextField", description: "Page title", domClassList: ["OmniboxViewViews"]),
-        .init(role: "AXTextField", description: "Address", domClassList: ["OmniboxViewViews"]),
-        .init(role: "AXTextField", description: "Search", domClassList: ["OmniboxViewViews"]),
-        .init(role: "AXTextField", description: "Address and search bar", domClassList: []),
-        .init(role: "AXTextField", description: "Address and search bar", domClassList: [""]),
-        .init(role: "AXTextField", description: "Address and search bar", domClassList: ["NotBraveOmniboxViewViews"]),
+        .init(role: "AXTextField", description: "Address and search bar", domClassList: ["OmniboxViewViews"]),
+        .init(role: "AXTextArea", description: "Address and search bar", domClassList: ["OmniboxViewViews"], profile: chromiumProfile),
+        .init(role: "AXTextField", description: "Page title", domClassList: ["OmniboxViewViews"], profile: chromiumProfile),
+        .init(role: "AXTextField", description: "Address", domClassList: ["OmniboxViewViews"], profile: chromiumProfile),
+        .init(role: "AXTextField", description: "Search", domClassList: ["OmniboxViewViews"], profile: chromiumProfile),
+        .init(role: "AXTextField", description: "Address and search bar", domClassList: [], profile: chromiumProfile),
+        .init(role: "AXTextField", description: "Address and search bar", domClassList: [""], profile: chromiumProfile),
+        .init(role: "AXTextField", description: "Address and search bar", domClassList: ["OmniboxViewViews"], profile: registry.profile(for: "com.apple.Safari")),
+        .init(role: "AXTextField", description: "Address and search bar", domClassList: ["NotBraveOmniboxViewViews"], profile: chromiumProfile),
         .init(role: "AXTextField", description: "Address and search bar",
-              domClassList: ["custom.BraveOmniboxViewViews"]),
-        .init(role: "AXTextField", description: "Address and search bar", domClassList: ["NotOmniboxViewViews"])
+              domClassList: ["custom.BraveOmniboxViewViews"], profile: chromiumProfile),
+        .init(role: "AXTextField", description: "Address and search bar", domClassList: ["NotOmniboxViewViews"], profile: chromiumProfile)
     ]
     for metadata in wrongMetadata {
         check(selectedRead("oabc", selection: canonical, metadata: metadata) == nil,
               "selected reader rejects missing or noncanonical actual-field metadata")
+    }
+    var stored: Data?
+    let customRegistry = SharedBrowserRegistry(readData: { stored }, writeData: { stored = $0 })
+    do {
+        var custom = BrowserProfileEntry(name: "Custom", bundleIdentifier: "example.browser",
+            signature: BrowserSignatureOverrides(exactDescriptions: ["Barre d’adresse"], domClasses: ["CustomOmnibox"]))
+        try customRegistry.add(custom)
+        let localized = CaretWordAXReader.OmniboxMetadata(role: "AXTextField", description: "Barre d’adresse",
+            domClassList: ["CustomOmnibox"], profile: customRegistry.profile(for: custom.bundleIdentifier))
+        check(selectedRead("oabc", selection: canonical, metadata: localized)?.word == "o",
+              "configured exact localized description and class are eligible")
+        let nearLocalized = CaretWordAXReader.OmniboxMetadata(role: "AXTextField", description: "Barre d’adresse ",
+            domClassList: ["CustomOmnibox"], profile: customRegistry.profile(for: custom.bundleIdentifier))
+        check(selectedRead("oabc", selection: canonical, metadata: nearLocalized) == nil,
+              "localized description must match exactly")
+        custom.enabled = false
+        try customRegistry.update(custom)
+        let disabled = CaretWordAXReader.OmniboxMetadata(role: "AXTextField", description: "Barre d’adresse",
+            domClassList: ["CustomOmnibox"], profile: customRegistry.profile(for: custom.bundleIdentifier))
+        check(selectedRead("oabc", selection: canonical, metadata: disabled) == nil,
+              "disabled profile cannot authorize selected proof")
+    } catch {
+        check(false, "custom registry fixture setup succeeds")
     }
     check(selectedRead("oabc!", selection: canonical) == nil, "selected suffix must end at field end")
     check(selectedRead("oabc", selection: canonical, finalSelection: CFRange(location: 1, length: 2)) == nil,
@@ -87,7 +115,8 @@ private func braveSelectedFlow(_ keys: String, expected: [String]) {
     let text = "o" + String(repeating: "x", count: 68)
     let selection = CFRange(location: 1, length: 68)
     let metadata = CaretWordAXReader.OmniboxMetadata(role: "AXTextField", description: "Address and search bar",
-                                                     domClassList: ["BraveOmniboxViewViews"])
+                                                     domClassList: ["BraveOmniboxViewViews"],
+                                                     profile: registry.profile(for: "com.brave.Browser"))
     var selections = 0
     var lengths = 0
     var focuses = 0

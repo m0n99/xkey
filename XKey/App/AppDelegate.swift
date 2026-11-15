@@ -1818,6 +1818,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             guard let self else { return }
             SharedSettings.shared.invalidateCache()
+            SharedBrowserRegistry.shared.reload()
             let enabled = SharedSettings.shared.vietnameseEnabled
             let xkeyIMOwnsInput = SharedSettings.shared.isXKeyIMTapOwningInput
             let action = self.mainSettingsChangeTracker?.update(
