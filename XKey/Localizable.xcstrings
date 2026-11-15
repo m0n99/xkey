@@ -3165,6 +3165,22 @@
         }
       }
     },
+    "Khôi phục cả từ đã hủy dấu bằng phím lặp": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore words after repeated-key cancellation"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "也恢复重复按键撤销声调标记后的词"
+          }
+        }
+      }
+    },
     "Khôi phục mặc định": {
       "localizations": {
         "en": {

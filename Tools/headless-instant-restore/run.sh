@@ -18,6 +18,7 @@ swiftc \
     Tools/headless-recovery/Stubs.swift \
     Tools/headless-instant-restore/RimeScenarios.swift \
     Tools/headless-instant-restore/StructuralScenarios.swift \
+    Tools/headless-instant-restore/RepeatedMarkScenarios.swift \
     Tools/headless-instant-restore/main.swift \
     -o build/headless-instant-restore/run
 exec build/headless-instant-restore/run

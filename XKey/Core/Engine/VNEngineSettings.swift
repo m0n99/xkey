@@ -26,6 +26,7 @@ extension VNEngine {
         var restoreIfWrongSpelling: Bool = true
         var skipRestoreForUppercaseVietnameseAbbreviations: Bool = false
         var undoTypingAfterMarkCancel: Bool = false
+        var restoreAfterMarkCancel: Bool = false
 
         var customConsonants: Set<UInt16> = []
         
@@ -79,6 +80,7 @@ extension VNEngine {
         vRestoreIfWrongSpelling = settings.restoreIfWrongSpelling ? 1 : 0
         vSkipRestoreForUppercaseVietnameseAbbreviations = settings.skipRestoreForUppercaseVietnameseAbbreviations ? 1 : 0
         vUndoAfterMarkCancel = settings.undoTypingAfterMarkCancel ? 1 : 0
+        vRestoreAfterMarkCancel = settings.restoreAfterMarkCancel ? 1 : 0
 
         vCustomConsonants = settings.customConsonants
         
@@ -130,6 +132,7 @@ extension VNEngine {
         settings.restoreIfWrongSpelling = vRestoreIfWrongSpelling == 1
         settings.skipRestoreForUppercaseVietnameseAbbreviations = vSkipRestoreForUppercaseVietnameseAbbreviations == 1
         settings.undoTypingAfterMarkCancel = vUndoAfterMarkCancel == 1
+        settings.restoreAfterMarkCancel = vRestoreAfterMarkCancel == 1
         settings.customConsonants = vCustomConsonants
         
         // Macro settings

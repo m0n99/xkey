@@ -104,6 +104,13 @@ struct AdvancedSection: View {
                                             .font(.caption)
                                             .foregroundColor(.secondary)
                                             .padding(.leading, 40)
+
+                                        // Independent of instant restore: word-boundary restore still applies
+                                        Toggle(
+                                            "Khôi phục cả từ đã hủy dấu bằng phím lặp",
+                                            isOn: $viewModel.preferences.restoreAfterMarkCancel
+                                        )
+                                            .padding(.leading, 40)
                                     }
                                 }
                             }

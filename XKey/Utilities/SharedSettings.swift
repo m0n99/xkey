@@ -40,6 +40,7 @@ enum SharedSettingsKey: String {
     case upperCaseFirstChar = "XKey.upperCaseFirstChar"
     case capitalizeOnlyAfterSpace = "XKey.capitalizeOnlyAfterSpace"
     case restoreIfWrongSpelling = "XKey.restoreIfWrongSpelling"
+    case restoreAfterMarkCancel = "XKey.restoreAfterMarkCancel"
     case instantRestoreOnWrongSpelling = "XKey.instantRestoreOnWrongSpelling"
     case skipRestoreForUppercaseVietnameseAbbreviations = "XKey.skipRestoreForUppercaseVietnameseAbbreviations"
 
@@ -633,6 +634,11 @@ class SharedSettings {
     var undoTypingAfterMarkCancel: Bool {
         get { readBool(forKey: SharedSettingsKey.undoTypingAfterMarkCancel.rawValue) }
         set { writeBool(newValue, forKey: SharedSettingsKey.undoTypingAfterMarkCancel.rawValue) }
+    }
+
+    var restoreAfterMarkCancel: Bool {
+        get { readBool(forKey: SharedSettingsKey.restoreAfterMarkCancel.rawValue) }
+        set { writeBool(newValue, forKey: SharedSettingsKey.restoreAfterMarkCancel.rawValue) }
     }
 
     var undoTypingHotkeyCode: UInt16 {
@@ -2017,6 +2023,7 @@ class SharedSettings {
         }
         prefs.undoTypingEnabled = undoTypingEnabled
         prefs.undoTypingAfterMarkCancel = undoTypingAfterMarkCancel
+        prefs.restoreAfterMarkCancel = restoreAfterMarkCancel
 
         // Undo typing hotkey
         let undoHotkeyCode = undoTypingHotkeyCode
@@ -2212,6 +2219,7 @@ class SharedSettings {
         toggleHotkeyIsModifierOnly = prefs.toggleHotkey.isModifierOnly
         undoTypingEnabled = prefs.undoTypingEnabled
         undoTypingAfterMarkCancel = prefs.undoTypingAfterMarkCancel
+        restoreAfterMarkCancel = prefs.restoreAfterMarkCancel
 
         // Undo typing hotkey (optional)
         if let undoHotkey = prefs.undoTypingHotkey {

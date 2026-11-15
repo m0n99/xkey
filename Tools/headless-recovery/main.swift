@@ -1,5 +1,8 @@
 import Foundation
 
+// Keep this CLI focused on AX eligibility and word-boundary restoration.
+SharedSettings.shared.instantRestoreOnWrongSpelling = false
+
 func check(_ condition: @autoclosure () -> Bool, _ message: String) {
     guard condition() else {
         fputs("FAIL: \(message)\n", stderr)

@@ -92,6 +92,7 @@ struct Preferences: Codable {
     var upperCaseFirstChar: Bool = false         // Auto capitalize first letter
     var capitalizeOnlyAfterSpace: Bool = true    // Sub-option: only capitalize after . ? ! when followed by a space (newline still always caps)
     var restoreIfWrongSpelling: Bool = true      // Restore if wrong spelling
+    var restoreAfterMarkCancel: Bool = false
     var instantRestoreOnWrongSpelling: Bool = false // Restore immediately when wrong spelling detected
     var skipRestoreForUppercaseVietnameseAbbreviations: Bool = false // Skip restore for all-caps Vietnamese abbreviations
     var customConsonantEnabled: Bool = false         // Whether custom consonants feature is enabled

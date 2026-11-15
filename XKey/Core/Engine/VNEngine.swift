@@ -61,6 +61,7 @@ class VNEngine {
     var vUpperCaseFirstChar = 0    // 0: No, 1: Yes
     var vUpperCaseRequireSpace = 1 // 0: cap right after . ? ! even with no space; 1: require a space after . ? ! (newline always caps)
     var vUndoAfterMarkCancel = 0   // 0: No, 1: Yes (undo also when screen differs from raw keys without diacritics, e.g. "trafic")
+    var vRestoreAfterMarkCancel = 0
     var vTempOffSpelling = 0       // 0: No, 1: Yes (temp off spell check via toolbar)
     var vTempOffEngine = 0         // 0: No, 1: Yes (temp off engine via toolbar)
     /// Optional instance-level final spelling provider. Nil preserves the shared
@@ -161,6 +162,7 @@ class VNEngine {
 
     var tempDisableKey = false
     private var literalUntilWordBreak = false
+    private var witnessedMarkCancellation = false
     var spaceCount = 0
     var hasHandledMacro = false
     var upperCaseStatus: UInt8 = 0
@@ -308,6 +310,7 @@ class VNEngine {
     }
 
     private func handleWordBreak(keyCode: UInt16, character: Character, isCaps: Bool) {
+        defer { witnessedMarkCancellation = false }
         hookState.code = UInt8(vDoNothing)
         hookState.backspaceCount = 0
         hookState.newCharCount = 0
@@ -360,6 +363,22 @@ class VNEngine {
             hookState.extCode = 3 // normal word
         }
         
+        resetSessionAfterWordBreak(isCharKeyCode: isCharKeyCode)
+
+        // IMPORTANT: Reset cursorMovedSinceReset after word break
+        // This allows backspace to restore words from history even if user clicked before typing
+        // The user has now typed a complete word (saved to history), so backspace should work
+        // Same logic as processWordBreak() at the end
+        cursorMovedSinceReset = false
+
+        // Upper case first char — delegate to updateUpperCaseStatus()
+        // which is the single source of truth for status transitions.
+        // Use the character parameter directly — it already contains the correct
+        // character ("\n" for Enter, "." for period, " " for space, etc.)
+        updateUpperCaseStatus(character: character)
+    }
+
+    private func resetSessionAfterWordBreak(isCharKeyCode: Bool) {
         // Handle session management
         // For special characters (charKeyCode), preserve macroKey to allow building macros
         if hookState.code == UInt8(vDoNothing) {
@@ -377,18 +396,6 @@ class VNEngine {
         } else if hookState.code == UInt8(vReplaceMacro) || hasHandleQuickConsonant {
             buffer.clear()
         }
-        
-        // IMPORTANT: Reset cursorMovedSinceReset after word break
-        // This allows backspace to restore words from history even if user clicked before typing
-        // The user has now typed a complete word (saved to history), so backspace should work
-        // Same logic as processWordBreak() at the end
-        cursorMovedSinceReset = false
-        
-        // Upper case first char — delegate to updateUpperCaseStatus()
-        // which is the single source of truth for status transitions.
-        // Use the character parameter directly — it already contains the correct
-        // character ("\n" for Enter, "." for period, " " for space, etc.)
-        updateUpperCaseStatus(character: character)
     }
     
     
@@ -398,6 +405,7 @@ class VNEngine {
     private func handleDelete() {
         typingRevision &+= 1
         literalUntilWordBreak = false
+        witnessedMarkCancellation = false
         let currentWord = !buffer.isEmpty ? getCurrentWord() : "(empty)"
         logCallback?("handleDelete: count=\(buffer.count), spaceCount=\(spaceCount), specialChar=\(specialChar.count), word='\(currentWord)'")
 
@@ -550,6 +558,7 @@ class VNEngine {
         let visibleCount = buffer.count
         let visibleWord = vUseMacro == 1 ? (0..<visibleCount).map { typingWord[$0] } : []
         let isSpecial = isSpecialKey(keyCode: keyCode)
+        var cancelledMark = false
         
         // Bracket keys [/] are EXPLICIT Vietnamese standalone input (ơ/ư).
         // They should bypass tempDisableKey because:
@@ -582,6 +591,7 @@ class VNEngine {
             hookState.code = UInt8(vDoNothing)
             hookState.extCode = 3
             handleMainKey(keyCode: keyCode, isCaps: isCaps)
+            cancelledMark = hookState.code == UInt8(vRestore) && hookState.extCode != 5
         }
 
         restoreInvalidComposition(
@@ -647,6 +657,13 @@ class VNEngine {
             // The modifier "s" on entry "á" represents the first "s", and the new entry "s"
             // from insertKey represents the second "s" that triggered restore.
             // The dd undo in insertD is the exception: see the comment there.
+            if cancelledMark {
+                witnessedMarkCancellation = true
+                restoreInvalidComposition(
+                    visibleCount: visibleCount, visibleWord: visibleWord, keyCode: keyCode, isCaps: isCaps,
+                    cancellationReady: true
+                )
+            }
         }
         
         // Insert or replace key for macro
@@ -704,35 +721,33 @@ class VNEngine {
         }
     }
 
-    private func restoreInvalidComposition(visibleCount: Int, visibleWord: [UInt32], keyCode: UInt16, isCaps: Bool) {
+    @discardableResult
+    private func restoreInvalidComposition(
+        visibleCount: Int, visibleWord: [UInt32], keyCode: UInt16, isCaps: Bool,
+        cancellationReady: Bool = false, atBoundary: Bool = false
+    ) -> Bool {
         if let log = logCallback { logInstantRestoreVeto(visibleCount: visibleCount, log: log) }
         let isAppend = hookState.code == UInt8(vDoNothing) && buffer.count == visibleCount + 1
         let isTransformation = hookState.code == UInt8(vWillProcess) &&
             (buffer.count == visibleCount || buffer.count == visibleCount + 1)
-        guard !literalUntilWordBreak, isAppend || isTransformation,
+        guard !literalUntilWordBreak, cancellationReady || isAppend || isTransformation,
               SharedSettings.shared.spellCheckEnabled,
               SharedSettings.shared.restoreIfWrongSpelling,
-              SharedSettings.shared.instantRestoreOnWrongSpelling,
+              atBoundary || SharedSettings.shared.instantRestoreOnWrongSpelling,
+              !cancellationReady || vRestoreAfterMarkCancel == 1,
               vCheckSpelling == 1, vRestoreIfWrongSpelling == 1,
               vTempOffEngine == 0, vTempOffSpelling == 0,
+              !willTempOffEngine,
               !cursorMovedSinceReset, !focusChangedDuringTyping, !bufferDesyncDetected,
-              !buffer.hasOverflow else { return }
+              !buffer.hasOverflow else { return false }
 
-        if isTransformation { checkSpelling() }
-        guard !spellingOK || !spellingVowelOK, hasVietnameseProcessing() else { return }
+        if !cancellationReady {
+            if isTransformation { checkSpelling() }
+            guard !spellingOK || !spellingVowelOK, hasVietnameseProcessing() else { return false }
+        }
 
-        let rawCount = buffer.keystrokeSequenceCount
-        guard rawCount > 0, rawCount <= TypingBuffer.MAX_SIZE,
-              rawCount <= hookState.charData.count, rawCount == buffer.totalKeystrokeCount else {
-            logCallback?("Instant restore veto: rawCount=\(rawCount) max=\(TypingBuffer.MAX_SIZE) " +
-                         "capacity=\(hookState.charData.count) total=\(buffer.totalKeystrokeCount)")
-            return
-        }
-        let raw = buffer.getKeystrokeSequence()
-        guard let last = raw.last, last.keyCode == keyCode, last.isCaps == isCaps else {
-            logCallback?("Instant restore veto: current key missing from raw history")
-            return
-        }
+        guard let raw = replayableRawSequence(keyCode: keyCode, isCaps: isCaps, cancellationReady: cancellationReady)
+        else { return false }
 
         if vUseMacro == 1 {
             if hookState.macroKey.count >= visibleCount &&
@@ -757,6 +772,36 @@ class VNEngine {
         hookState.newCharCount = raw.count
         hookState.extCode = 5
         literalUntilWordBreak = true
+        witnessedMarkCancellation = false
+        return true
+    }
+
+    private func replayableRawSequence(keyCode: UInt16, isCaps: Bool, cancellationReady: Bool) -> [RawKeystroke]? {
+        let rawCount = buffer.keystrokeSequenceCount
+        guard rawCount > 0, rawCount <= TypingBuffer.MAX_SIZE,
+              rawCount <= hookState.charData.count, rawCount == buffer.totalKeystrokeCount else {
+            logCallback?("Instant restore veto: rawCount=\(rawCount) max=\(TypingBuffer.MAX_SIZE) " +
+                         "capacity=\(hookState.charData.count) total=\(buffer.totalKeystrokeCount)")
+            return nil
+        }
+        let raw = buffer.getKeystrokeSequence()
+        guard let last = raw.last, last.keyCode == keyCode, last.isCaps == isCaps else {
+            logCallback?("Instant restore veto: current key missing from raw history")
+            return nil
+        }
+        if cancellationReady {
+            let word = getCurrentWord()
+            guard !isDefaultDStrokeAbbreviation(word),
+                  vSkipRestoreForUppercaseVietnameseAbbreviations != 1 ||
+                    !isUppercaseVietnameseMarkedAbbreviation(word) else { return nil }
+            let characters = raw.compactMap { key -> String? in
+                guard let character = keyCodeToCharacter(key.keyCode) else { return nil }
+                let text = String(character)
+                return key.isCaps ? text.uppercased() : text
+            }
+            guard characters.count == raw.count, characters.joined() != word else { return nil }
+        }
+        return raw
     }
 
     private func logInstantRestoreVeto(visibleCount: Int, log: (String) -> Void) {
@@ -2982,6 +3027,7 @@ class VNEngine {
     /// Restore last word from history
     func restoreLastTypingState() {
         typingRevision &+= 1
+        witnessedMarkCancellation = false
         logCallback?("restoreLastTypingState: history.count=\(history.count)")
 
         guard let lastSnapshot = history.popLast() else {
@@ -3019,6 +3065,7 @@ class VNEngine {
     func startNewSession() {
         typingRevision &+= 1
         literalUntilWordBreak = false
+        witnessedMarkCancellation = false
         focusChangedDuringTyping = false
         let prevWord = !buffer.isEmpty ? getCurrentWord() : ""
         let prevCount = buffer.count
@@ -3187,6 +3234,7 @@ class VNEngine {
     /// Clear history (for terminal apps after Enter key)
     /// This prevents backspace from restoring words from previous command lines
     func clearHistory() {
+        witnessedMarkCancellation = false
         typingRevision &+= 1
         history.clear()
         logCallback?("clearHistory: history cleared for terminal")
@@ -3460,6 +3508,7 @@ extension VNEngine {
         // Without this guard, early returns would skip the status update and break auto-capitalize
         // after sentence-ending punctuation that triggers macro or restore.
         defer { updateUpperCaseStatus(character: character) }
+        defer { witnessedMarkCancellation = false }
 
         // Only trigger macro on SPACE - not on other word break characters
         // This prevents macros like "you@" from triggering immediately when typing "@"
@@ -3490,6 +3539,45 @@ extension VNEngine {
                 // can be very large (code snippets, templates) and shouldn't be stored
                 reset()
                 // upperCaseStatus is updated via defer on function exit
+                return result
+            }
+        }
+
+        if isRestoreTrigger && witnessedMarkCancellation,
+           let last = buffer.getKeystrokeSequence().last {
+            let visibleCount = buffer.count
+            let visibleWord = vUseMacro == 1 ? (0..<visibleCount).map { typingWord[$0] } : []
+            if restoreInvalidComposition(
+                visibleCount: visibleCount, visibleWord: visibleWord, keyCode: last.keyCode, isCaps: last.isCaps,
+                cancellationReady: true, atBoundary: true
+            ) {
+                var result = convertHookStateToResult(
+                    hookState, currentKeyCode: nil, currentCharacter: nil, isUppercase: false
+                )
+                result.newCharacters.append(VNCharacter(character: character))
+                if spaceCount > 0 {
+                    saveWord(keyCode: VietnameseData.KEY_SPACE, count: spaceCount)
+                }
+                history.save(buffer.createSnapshot())
+                spaceCount = 1
+                if isSpace {
+                    startNewSession()
+                } else {
+                    if shouldUseMacro(), let keyCode = Self.wordBreakCharToKeyCode[character],
+                       vietnameseData.charKeyCode.contains(keyCode) {
+                        hookState.macroKey.append(UInt32(keyCode))
+                    }
+                    buffer.clear()
+                    literalUntilWordBreak = false
+                    hookState.backspaceCount = 0
+                    hookState.newCharCount = 0
+                    tempDisableKey = false
+                    hasHandledMacro = false
+                    hasHandleQuickConsonant = false
+                }
+                vCheckSpelling = useSpellCheckingBefore ? 1 : 0
+                willTempOffEngine = false
+                cursorMovedSinceReset = false
                 return result
             }
         }

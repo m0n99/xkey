@@ -118,6 +118,10 @@ class KeyboardEventHandler: EventTapManager.EventTapDelegate {
     @Published var undoTypingAfterMarkCancel: Bool = false {
         didSet { updateEngineSettings() }
     }
+
+    @Published var restoreAfterMarkCancel: Bool = false {
+        didSet { updateEngineSettings() }
+    }
     
     @Published var customConsonants: Set<UInt16> = [] {
         didSet { updateEngineSettings() }
@@ -448,6 +452,7 @@ class KeyboardEventHandler: EventTapManager.EventTapDelegate {
         settings.restoreIfWrongSpelling = restoreIfWrongSpelling
         settings.skipRestoreForUppercaseVietnameseAbbreviations = skipRestoreForUppercaseVietnameseAbbreviations
         settings.undoTypingAfterMarkCancel = undoTypingAfterMarkCancel
+        settings.restoreAfterMarkCancel = restoreAfterMarkCancel
 
         settings.customConsonants = customConsonants
         
@@ -486,6 +491,7 @@ class KeyboardEventHandler: EventTapManager.EventTapDelegate {
         restoreIfWrongSpelling = settings.restoreIfWrongSpelling
         skipRestoreForUppercaseVietnameseAbbreviations = settings.skipRestoreForUppercaseVietnameseAbbreviations
         undoTypingAfterMarkCancel = settings.undoTypingAfterMarkCancel
+        restoreAfterMarkCancel = settings.restoreAfterMarkCancel
         customConsonants = settings.customConsonants
         macroEnabled = settings.macroEnabled
         macroInEnglishMode = settings.macroInEnglishMode

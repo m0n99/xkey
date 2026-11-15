@@ -39,8 +39,18 @@ final class Screen {
         for char in keys { key(char) }
     }
 
-    func boundary(_ char: Character) {
-        apply(engine.processWordBreak(character: char), native: String(char))
+    @discardableResult
+    func boundary(_ char: Character) -> VNEngine.ProcessResult {
+        let result = engine.processWordBreak(character: char)
+        apply(result, native: String(char))
+        return result
+    }
+
+    @discardableResult
+    func undo() -> VNEngine.ProcessResult {
+        let result = engine.undoTyping()
+        apply(result, native: "")
+        return result
     }
 
     func backspace() {
@@ -307,6 +317,7 @@ testVietnamesePrefixes()
 testModifierCancellation()
 testRawModifierOrder()
 testConsumedVniMark()
+testRepeatedMarkScenarios()
 if failures > 0 {
     print("\(failures) instant-restore checks failed")
     exit(1)

@@ -67,7 +67,7 @@ extension VNEngine {
         return characters.allSatisfy { $0.isLetter && String($0) == String($0).uppercased() }
     }
 
-    private func isUppercaseVietnameseMarkedAbbreviation(_ word: String) -> Bool {
+    func isUppercaseVietnameseMarkedAbbreviation(_ word: String) -> Bool {
         let characters = Array(word)
         guard characters.count >= 2,
               characters.allSatisfy({ $0.isLetter && String($0) == String($0).uppercased() }),

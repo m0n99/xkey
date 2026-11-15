@@ -34,6 +34,7 @@ struct RuntimePreferences {
         engineSettings.restoreIfWrongSpelling = preferences.restoreIfWrongSpelling
         engineSettings.skipRestoreForUppercaseVietnameseAbbreviations = preferences.skipRestoreForUppercaseVietnameseAbbreviations
         engineSettings.undoTypingAfterMarkCancel = preferences.undoTypingAfterMarkCancel
+        engineSettings.restoreAfterMarkCancel = preferences.restoreAfterMarkCancel
         let customConsonants = preferences.customConsonantEnabled ? preferences.customConsonants : ""
         engineSettings.customConsonants = VietnameseData.parseCustomConsonants(customConsonants)
         engineSettings.macroEnabled = preferences.macroEnabled

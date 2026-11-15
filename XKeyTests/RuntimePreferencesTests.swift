@@ -16,6 +16,7 @@ final class RuntimePreferencesTests: XCTestCase {
         preferences.restoreIfWrongSpelling = false
         preferences.skipRestoreForUppercaseVietnameseAbbreviations = true
         preferences.undoTypingAfterMarkCancel = true
+        preferences.restoreAfterMarkCancel = true
         preferences.customConsonantEnabled = true
         preferences.customConsonants = "Z,F"
         preferences.macroEnabled = true
@@ -49,6 +50,7 @@ final class RuntimePreferencesTests: XCTestCase {
         XCTAssertFalse(snapshot.engineSettings.restoreIfWrongSpelling)
         XCTAssertTrue(snapshot.engineSettings.skipRestoreForUppercaseVietnameseAbbreviations)
         XCTAssertTrue(snapshot.engineSettings.undoTypingAfterMarkCancel)
+        XCTAssertTrue(snapshot.engineSettings.restoreAfterMarkCancel)
         XCTAssertEqual(snapshot.engineSettings.customConsonants,
                        VietnameseData.parseCustomConsonants("Z,F"))
         XCTAssertTrue(snapshot.engineSettings.macroEnabled)
@@ -64,6 +66,28 @@ final class RuntimePreferencesTests: XCTestCase {
         XCTAssertEqual(snapshot.excludedApps, preferences.excludedApps)
         XCTAssertTrue(snapshot.undoTypingEnabled)
         XCTAssertTrue(snapshot.remoteDesktopInjectMode)
+    }
+
+    func testMarkCancelSettingsDefaultToFalseAndMapIndependently() {
+        var preferences = Preferences()
+        XCTAssertFalse(preferences.restoreAfterMarkCancel)
+        XCTAssertFalse(VNEngine.EngineSettings().restoreAfterMarkCancel)
+        preferences.restoreAfterMarkCancel = true
+
+        let snapshot = RuntimePreferences(
+            preferences: preferences,
+            vietnameseEnabled: true,
+            windowTitleRulesEnabled: true,
+            remoteDesktopInjectMode: false
+        )
+
+        XCTAssertTrue(snapshot.engineSettings.restoreAfterMarkCancel)
+        XCTAssertFalse(snapshot.engineSettings.undoTypingAfterMarkCancel)
+
+        let engine = VNEngine()
+        engine.updateSettings(snapshot.engineSettings)
+        XCTAssertTrue(engine.settings.restoreAfterMarkCancel)
+        XCTAssertFalse(engine.settings.undoTypingAfterMarkCancel)
     }
 
     func testDisabledCustomConsonantsMapToEmptyEngineSet() {
