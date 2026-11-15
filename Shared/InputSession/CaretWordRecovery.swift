@@ -1,5 +1,10 @@
 import Foundation
 
+enum CaretWordProofKind: Equatable {
+    case collapsedCaret
+    case selectedSuffixReplacement(selectionLength: Int)
+}
+
 struct CaretWordReport: Equatable {
     let word: String
     let caretAtWordEnd: Bool
@@ -8,6 +13,9 @@ struct CaretWordReport: Equatable {
     let elementSignature: String
     let appBundleId: String?
     let expectedRevision: UInt64
+    var caretAtFieldStart: Bool = false
+    var fieldIsEmpty: Bool = false
+    var proofKind: CaretWordProofKind = .collapsedCaret
 }
 
 enum RecoveryOutcome: Equatable {

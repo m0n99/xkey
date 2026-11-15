@@ -46,7 +46,7 @@ func parse(_ left: String, _ right: String = "", _ leftBounded: Bool = true, _ r
 func readContext(_ text: String, selection: CFRange, role: String = "AXTextField",
                  subrole: String? = nil, editable: Bool = true, focused: Bool = true,
                  finalSelection: CFRange? = nil, readable: Bool = true,
-                 ranges: ((CFRange) -> Void)? = nil) -> CaretWordReport? {
+                 ranges: ((CFRange) -> Void)? = nil, diagnostic: ((String) -> Void)? = nil) -> CaretWordReport? {
     var selectionReads = 0
     let provider = CaretWordAXReader.Provider(
         role: { role }, subrole: { subrole }, isEditable: { editable },
@@ -58,7 +58,7 @@ func readContext(_ text: String, selection: CFRange, role: String = "AXTextField
             guard readable else { return nil }
             return (text as NSString).substring(with: NSRange(location: range.location, length: range.length))
         }, isStillFocused: { focused })
-    return CaretWordAXReader.read(provider, signature: "field", bundleId: "app", revision: 7)
+    return CaretWordAXReader.read(provider, signature: "field", bundleId: "app", revision: 7, diagnostic: diagnostic)
 }
 
 check(parse("a thử")?.word == "thử", "parser returns bounded word")
@@ -91,6 +91,24 @@ do {
     check(readContext("abc", selection: caret, finalSelection: CFRange(location: 3, length: 1)) == nil, "reader rejects newly selected text")
     check(readContext("e\u{301}", selection: CFRange(location: 2, length: 0)) == nil, "reader rejects NFD")
     check(readContext(String(repeating: "a", count: 65), selection: CFRange(location: 65, length: 0)) == nil, "reader rejects clipped word")
+    var reason = ""
+    var textReads = 0
+    let capture: (String) -> Void = { reason = $0 }
+    check(readContext("abc", selection: CFRange(location: 1, length: 1), diagnostic: capture) == nil &&
+          reason == "nonCollapsedSelection location=1 length=1", "diagnostic identifies noncollapsed selection")
+    check(readContext("abc", selection: caret, role: "AXStaticText", diagnostic: capture) == nil &&
+          reason == "unsupportedRole role=AXStaticText", "diagnostic identifies unsupported static text")
+    check(readContext("abc", selection: caret, readable: false, diagnostic: capture) == nil &&
+          reason == "textUnavailable side=left", "diagnostic identifies failed text read")
+    check(readContext("abc", selection: caret, finalSelection: CFRange(location: 2, length: 0),
+                      diagnostic: capture) == nil &&
+          reason == "selectionChanged location=2 length=0", "diagnostic identifies moved selection")
+    check(readContext("abc", selection: caret, subrole: "AXSecureTextField", ranges: { _ in textReads += 1 },
+                      diagnostic: capture) == nil &&
+          reason == "secureField" && textReads == 0, "secure diagnostic performs no text reads")
+    textReads = 0
+    _ = readContext("abc", selection: caret, ranges: { _ in textReads += 1 }, diagnostic: capture)
+    check(textReads == 1, "diagnostics add no text reads")
 }
 
 do {
@@ -319,4 +337,6 @@ do {
     check(!engine.focusChangedDuringTyping, "new session clears old focus guard")
 }
 
+runBackspaceContextScenarios()
+runSelectedSuffixScenarios()
 print("Headless production-engine recovery checks passed")

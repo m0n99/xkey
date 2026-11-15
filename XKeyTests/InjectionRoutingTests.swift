@@ -128,4 +128,41 @@ final class InjectionRoutingTests: XCTestCase {
         _ = canRunAsync(method: .axDirect, probe: probe)
         XCTAssertFalse(probe.evaluated, "cheap method checks must short-circuit before the app lookup")
     }
+
+    func testSelectedSuffixProfileRequiresSupportedNonPastePrefix() {
+        for method in InjectionMethod.allCases {
+            for prefix in [false, true] {
+                for text in TextSendingMethod.allCases {
+                    let info = InjectionMethodInfo(method: method, delays: (0, 0, 0), textSendingMethod: text,
+                                                   description: "test", needsEmptyCharPrefix: prefix)
+                    let expected = (method == .fast || method == .slow) && prefix && text != .paste
+                    XCTAssertEqual(SelectedSuffixInjectionProfile(methodInfo: info) != nil, expected)
+                }
+            }
+        }
+    }
+
+    func testSelectedSuffixPostingOrderSyncAndAsync() throws {
+        for async in [false, true] {
+            let injector = CharacterInjector()
+            injector.prefersAsyncDirectInjection = async
+            var events: [CGEvent] = []
+            injector.eventPostObserver = { events.append($0) }
+            let info = InjectionMethodInfo(method: .fast, delays: (0, 0, 0), textSendingMethod: .chunked,
+                                           description: "snapshot", needsEmptyCharPrefix: true)
+            let profile = try XCTUnwrap(SelectedSuffixInjectionProfile(methodInfo: info))
+            // The observer intercepts every post; the proxy is never dereferenced.
+            let proxy = unsafeBitCast(UInt(1), to: CGEventTapProxy.self)
+            injector.inject(backspaceCount: 1, characters: [VNCharacter(character: "ỏ")],
+                            codeTable: .unicode, proxy: proxy, selectionNormalizationProfile: profile)
+            injector.waitForInjectionComplete()
+            let downs = events.filter { $0.type == .keyDown }
+            XCTAssertEqual(downs.count, 4, "sentinel, two deletes, replacement")
+            guard downs.count == 4 else { continue }
+            XCTAssertEqual(downs[0].characters, "\u{202F}")
+            XCTAssertEqual(downs[1].keyCode, VietnameseData.KEY_DELETE)
+            XCTAssertEqual(downs[2].keyCode, VietnameseData.KEY_DELETE)
+            XCTAssertEqual(downs[3].characters, "ỏ")
+        }
+    }
 }

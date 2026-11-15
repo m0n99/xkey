@@ -16,15 +16,21 @@ class KeyboardEventHandler: EventTapManager.EventTapDelegate {
     private let transport: CGEventTransport
     var engine: VNEngine { session.engine }
     var typingRevision: UInt64 { engine.typingRevision }
+    var needsBackspaceContextProof: Bool { engine.needsBackspaceContextProof }
+    var onNativeBackspacePassedThrough: (() -> Void)?
     var canRecoverCaretWord: Bool {
         guard AppBehaviorDetector.shared.confirmedInjectionMethod != nil else { return false }
         return activeInputContext() == true
     }
 
     @discardableResult
-    func recoverCaretWord(_ report: CaretWordReport) -> RecoveryOutcome {
+    func recoverCaretWord(_ report: CaretWordReport, nativeBackspaceProof: Bool = false) -> RecoveryOutcome {
         guard canRecoverCaretWord else { return .notApplicable }
-        return engine.recoverCaretWord(report)
+        if case .selectedSuffixReplacement = report.proofKind {
+            guard codeTable == .unicode,
+                  transport.captureSelectionNormalizationProfile() != nil else { return .notApplicable }
+        }
+        return engine.recoverCaretWord(report, nativeBackspaceProof: nativeBackspaceProof)
     }
     private var isVietnameseEnabled = true
     var durableVietnameseEnabled: Bool { isVietnameseEnabled }
@@ -314,7 +320,13 @@ class KeyboardEventHandler: EventTapManager.EventTapDelegate {
     /// Perform undo typing operation when triggered by EventTapManager hotkey callback
     /// Returns true if undo was performed (event should be consumed), false otherwise
     func performUndoTyping(event: CGEvent, proxy: CGEventTapProxy) -> Bool {
-        guard let effectiveVietnameseEnabled = activeInputContext() else { return false }
+        guard let effectiveVietnameseEnabled = activeInputContext() else {
+            if engine.selectionProofActive { engine.invalidateSelectedSuffixProof() }
+            return false
+        }
+        let profile = captureSelectedSuffixProfile()
+        engine.selectionNormalizationAvailable = profile != nil
+        defer { engine.selectionNormalizationAvailable = false }
         session.setEffectiveVietnameseEnabled(effectiveVietnameseEnabled)
         let inputEvent = InputEvent(kind: .undo,
                                     keyCode: nil,
@@ -322,12 +334,16 @@ class KeyboardEventHandler: EventTapManager.EventTapDelegate {
                                     modifiers: [],
                                     isRepeat: false)
         let action = session.handle(inputEvent)
-        guard case .replacement(let replacement) = action else { return false }
+        guard case .replacement(let replacement) = action else {
+            if engine.selectionProofActive { engine.invalidateSelectedSuffixProof() }
+            return false
+        }
         debugLogCallback?("🔙 Undo typing: backspaces=\(replacement.backspaces), text=\"\(replacement.text)\"")
         _ = transport.apply(action,
                             event: inputEvent,
                             originalEvent: event,
-                            proxy: proxy)
+                            proxy: proxy,
+                            selectionNormalizationProfile: profile)
         return true
     }
     
@@ -422,14 +438,34 @@ class KeyboardEventHandler: EventTapManager.EventTapDelegate {
             return event
         }
 
+        let profile = captureSelectedSuffixProfile()
+        engine.selectionNormalizationAvailable = profile != nil
+        defer { engine.selectionNormalizationAvailable = false }
         let action = session.handle(inputEvent)
+        if case .passThrough = action, inputEvent.keyCode == VietnameseData.KEY_ESC,
+           engine.selectionProofActive {
+            engine.invalidateSelectedSuffixProof()
+        }
         if case .replacement(let replacement) = action {
             debugLogCallback?("[\(getTimestamp())] CONSUME: bs=\(replacement.backspaces), text=\"\(replacement.text)\"")
         }
-        return transport.apply(action,
-                               event: inputEvent,
-                               originalEvent: event,
-                               proxy: proxy)
+        let result = transport.apply(action,
+                                     event: inputEvent,
+                                     originalEvent: event,
+                                     proxy: proxy,
+                                     selectionNormalizationProfile: profile)
+        if case .passThrough = action, result != nil,
+           inputEvent.keyCode == VietnameseData.KEY_DELETE,
+           inputEvent.modifiers.isDisjoint(with: [.command, .control, .option]),
+           needsBackspaceContextProof {
+            onNativeBackspacePassedThrough?()
+        }
+        return result
+    }
+
+    private func captureSelectedSuffixProfile() -> SelectedSuffixInjectionProfile? {
+        guard engine.selectionProofActive, codeTable == .unicode else { return nil }
+        return transport.captureSelectionNormalizationProfile()
     }
     // MARK: - Settings Update
     

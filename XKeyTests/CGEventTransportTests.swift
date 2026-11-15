@@ -74,6 +74,56 @@ final class CGEventTransportTests: XCTestCase {
                                                    characters: characters,
                                                    codeTable: .vniWindows)])
         XCTAssertEqual(sink.calls, [.injection])
+        XCTAssertNil(sink.injectionProfiles.first!)
+    }
+
+    func testCapturedProfileSurvivesSinkCapabilityChange() throws {
+        let sink = RecordingSink()
+        let info = InjectionMethodInfo(method: .fast, delays: (0, 0, 0), textSendingMethod: .chunked,
+                                       description: "captured", needsEmptyCharPrefix: true)
+        sink.capturedProfile = try XCTUnwrap(SelectedSuffixInjectionProfile(methodInfo: info))
+        let transport = CGEventTransport(sink: sink)
+        let captured = try XCTUnwrap(transport.captureSelectionNormalizationProfile())
+        sink.capturedProfile = nil
+        let event = try makeEvent(keyCode: VietnameseData.KEY_S, characters: "s")
+        let normalized = try XCTUnwrap(transport.normalize(event, type: .keyDown))
+        _ = transport.apply(.replace(backspaces: 1, text: "á"), event: normalized,
+                            originalEvent: event, proxy: nil, selectionNormalizationProfile: captured)
+        XCTAssertEqual(sink.injectionProfiles.count, 1)
+        XCTAssertEqual(sink.injectionProfiles[0]?.methodInfo.description, "captured")
+        XCTAssertTrue(sink.injectionProfiles[0]?.methodInfo.needsEmptyCharPrefix == true)
+    }
+
+    func testHandlerCapturesOnlyOncePerSelectedEvent() throws {
+        let sink = RecordingSink()
+        let handler = KeyboardEventHandler(transport: CGEventTransport(sink: sink))
+        handler.engine.vCheckSpelling = 0
+        let proxy = unsafeBitCast(UInt(1), to: CGEventTapProxy.self)
+        let initialEvent = try makeEvent(keyCode: VietnameseData.keyCode(for: "o")!, characters: "o")
+        _ = handler.processKeyEvent(initialEvent, type: .keyDown, proxy: proxy)
+        XCTAssertEqual(sink.captureCount, 0, "ordinary events must not capture a selection profile")
+        handler.engine.focusChangedDuringTyping = true
+        var proof = CaretWordReport(word: "o", caretAtWordEnd: true, selectionAnchoredAtCaret: false,
+                                    selectionLength: 3, elementSignature: "field", appBundleId: nil,
+                                    expectedRevision: handler.engine.typingRevision)
+        proof.proofKind = .selectedSuffixReplacement(selectionLength: 3)
+        XCTAssertEqual(handler.engine.recoverCaretWord(proof), .validated)
+        let info = InjectionMethodInfo(method: .fast, delays: (0, 0, 0), textSendingMethod: .chunked,
+                                       description: "event snapshot", needsEmptyCharPrefix: true)
+        sink.capturedProfile = try XCTUnwrap(SelectedSuffixInjectionProfile(methodInfo: info))
+        sink.onInject = { [weak sink] in sink?.capturedProfile = nil }
+        let transformEvent = try makeEvent(keyCode: VietnameseData.keyCode(for: "r")!, characters: "r")
+        XCTAssertNil(handler.processKeyEvent(transformEvent, type: .keyDown, proxy: proxy))
+        XCTAssertEqual(sink.captureCount, 1)
+        XCTAssertEqual(sink.injections.count, 1, "replacement must not be dropped after engine mutation")
+        XCTAssertEqual(sink.injectionProfiles.first??.methodInfo.description, "event snapshot")
+        XCTAssertFalse(handler.engine.selectionNormalizationAvailable, "capability is event scoped")
+        let nativeEvent = try makeEvent(keyCode: VietnameseData.keyCode(for: "d")!, characters: "d")
+        XCTAssertTrue(handler.processKeyEvent(nativeEvent, type: .keyDown, proxy: proxy) === nativeEvent)
+        XCTAssertEqual(sink.captureCount, 2, "each selected event captures once")
+        XCTAssertEqual(sink.injections.count, 1,
+                       "unsupported capture passes the native key instead of emitting a rewrite")
+        XCTAssertTrue(handler.engine.selectionProofActive)
     }
 
     func testReturnReplacementInjectsBeforeStartingNewSession() throws {
@@ -188,11 +238,23 @@ private final class RecordingSink: CGEventInjectionSink {
     var injections: [Injection] = []
     var sessions: [(cursorMoved: Bool, preserveMidSentence: Bool)] = []
     var calls: [SinkCall] = []
+    var capturedProfile: SelectedSuffixInjectionProfile?
+    var injectionProfiles: [SelectedSuffixInjectionProfile?] = []
+    var captureCount = 0
+    var onInject: (() -> Void)?
+
+    func captureSelectionNormalizationProfile() -> SelectedSuffixInjectionProfile? {
+        captureCount += 1
+        return capturedProfile
+    }
 
     func inject(backspaceCount: Int,
                 characters: [VNCharacter],
                 codeTable: CodeTable,
-                proxy: CGEventTapProxy?) {
+                proxy: CGEventTapProxy?,
+                selectionNormalizationProfile: SelectedSuffixInjectionProfile?) {
+        onInject?()
+        injectionProfiles.append(selectionNormalizationProfile)
         injections.append(Injection(backspaces: backspaceCount,
                                     characters: characters,
                                     codeTable: codeTable))
@@ -218,10 +280,13 @@ private final class BlockingInjectionSink: CGEventInjectionSink {
     let allowInjectionToFinish = DispatchSemaphore(value: 0)
     private let completed = DispatchSemaphore(value: 0)
 
+    func captureSelectionNormalizationProfile() -> SelectedSuffixInjectionProfile? { nil }
+
     func inject(backspaceCount: Int,
                 characters: [VNCharacter],
                 codeTable: CodeTable,
-                proxy: CGEventTapProxy?) {
+                proxy: CGEventTapProxy?,
+                selectionNormalizationProfile: SelectedSuffixInjectionProfile?) {
         DispatchQueue.global().async {
             self.injectionStarted.signal()
             self.allowInjectionToFinish.wait()

@@ -187,6 +187,15 @@ class VNEngine {
     /// This prevents incorrect restore when engine doesn't have full context (e.g., user
     /// clicked mid-word and continued typing, or backspaced across word boundary).
     var bufferDesyncDetected = false
+    private(set) var selectionProofActive = false
+    var selectionNormalizationAvailable = false
+    private var selectedReplacementVetoed: Bool {
+        selectionProofActive && !selectionNormalizationAvailable
+    }
+    var needsBackspaceContextProof: Bool {
+        !bufferDesyncDetected && (cursorMovedSinceReset || focusChangedDuringTyping) &&
+            history.count == 0 && spaceCount == 0 && specialChar.isEmpty
+    }
     private(set) var typingRevision: UInt64 = 0
 
     
@@ -311,6 +320,7 @@ class VNEngine {
 
     private func handleWordBreak(keyCode: UInt16, character: Character, isCaps: Bool) {
         defer { witnessedMarkCancellation = false }
+        let vetoReplacement = selectedReplacementVetoed
         hookState.code = UInt8(vDoNothing)
         hookState.backspaceCount = 0
         hookState.newCharCount = 0
@@ -320,7 +330,8 @@ class VNEngine {
         // just add them to macroKey WITHOUT triggering macro replacement.
         // Macro replacement should only happen when user presses SPACE.
         let isCharKeyCode = vietnameseData.charKeyCode.contains(keyCode)
-        if shouldUseMacro() && isMacroBreakCode(keyCode: keyCode, isCaps: isCaps) && !hasHandledMacro {
+        if !vetoReplacement && shouldUseMacro() &&
+            isMacroBreakCode(keyCode: keyCode, isCaps: isCaps) && !hasHandledMacro {
             if isCharKeyCode {
                 // Add character to macroKey for building macros like "you@" or "!bb"
                 hookState.macroKey.append(UInt32(keyCode) | (isCaps ? VNEngine.CAPS_MASK : 0))
@@ -330,14 +341,16 @@ class VNEngine {
         }
         
         // Check quick consonant
-        if (vQuickStartConsonant == 1 || vQuickEndConsonant == 1) && !tempDisableKey && isMacroBreakCode(keyCode: keyCode, isCaps: isCaps) {
+        if !vetoReplacement && (vQuickStartConsonant == 1 || vQuickEndConsonant == 1) &&
+            !tempDisableKey && isMacroBreakCode(keyCode: keyCode, isCaps: isCaps) {
             checkQuickConsonant()
         }
         
         // Check restore if wrong spelling
         // IMPORTANT: Skip restore if cursor was moved (editing mid-word)
         // Also skip if spelling is temporarily off via toolbar
-        if vRestoreIfWrongSpelling == 1 && vTempOffSpelling == 0 && isWordBreak(keyCode: keyCode) && !cursorMovedSinceReset {
+        if !vetoReplacement && vRestoreIfWrongSpelling == 1 && vTempOffSpelling == 0 &&
+            isWordBreak(keyCode: keyCode) && !cursorMovedSinceReset {
             if !tempDisableKey && vCheckSpelling == 1 {
                 checkSpelling(forceCheckVowel: true)
             }
@@ -364,6 +377,8 @@ class VNEngine {
         }
         
         resetSessionAfterWordBreak(isCharKeyCode: isCharKeyCode)
+        selectionProofActive = false
+        if vetoReplacement { hookState.macroKey.removeAll() }
 
         // IMPORTANT: Reset cursorMovedSinceReset after word break
         // This allows backspace to restore words from history even if user clicked before typing
@@ -403,9 +418,17 @@ class VNEngine {
 
     /// Handle delete/backspace key
     private func handleDelete() {
+        if selectionProofActive {
+            invalidateSelectedSuffixProof()
+            hookState = HookState()
+            hookState.extCode = 2
+            return
+        }
         typingRevision &+= 1
         literalUntilWordBreak = false
         witnessedMarkCancellation = false
+        let uncertainContext = cursorMovedSinceReset || focusChangedDuringTyping || bufferDesyncDetected
+        let hadBufferDesync = bufferDesyncDetected
         let currentWord = !buffer.isEmpty ? getCurrentWord() : "(empty)"
         logCallback?("handleDelete: count=\(buffer.count), spaceCount=\(spaceCount), specialChar=\(specialChar.count), word='\(currentWord)'")
 
@@ -418,7 +441,7 @@ class VNEngine {
             if specialChar.isEmpty {
                 // Skip restore if cursor was moved or focus changed (potential desync)
                 // This is safer than trying to verify via slow AX calls
-                if cursorMovedSinceReset || focusChangedDuringTyping {
+                if uncertainContext {
                     logCallback?("  → SKIP restore: cursor/focus changed, clearing history")
                     clearWithoutRestore()
                 } else {
@@ -431,7 +454,7 @@ class VNEngine {
             if spaceCount == 0 {
                 // Skip restore if cursor was moved or focus changed (potential desync)
                 // This is safer than trying to verify via slow AX calls
-                if cursorMovedSinceReset || focusChangedDuringTyping {
+                if uncertainContext {
                     logCallback?("  → SKIP restore: cursor/focus changed, clearing history")
                     clearWithoutRestore()
                 } else {
@@ -470,14 +493,15 @@ class VNEngine {
             if buffer.isEmpty {
                 logCallback?("  → Buffer empty, checking restore conditions...")
                 startNewSession()
+                bufferDesyncDetected = hadBufferDesync
                 specialChar.removeAll()
 
                 // Skip restore if cursor was moved or focus changed (potential desync)
                 // This is safer than trying to verify via slow AX calls
-                if cursorMovedSinceReset || focusChangedDuringTyping {
+                if uncertainContext {
                     logCallback?("  → SKIP restore: cursor/focus changed, clearing history")
                     history.clear()
-                    bufferDesyncDetected = true
+                    cursorMovedSinceReset = true
                 } else {
                     // Normal backspace - trust history without AX verify
                     // REASON: AX query has race condition - it may return stale data
@@ -494,21 +518,35 @@ class VNEngine {
     }
 
     /// Clear session without restoring from history
-    /// Used when desync is detected to prevent incorrect text insertion
+    /// Used when context is uncertain to prevent incorrect text insertion.
     private func clearWithoutRestore() {
+        let hadBufferDesync = bufferDesyncDetected
         startNewSession()
+        bufferDesyncDetected = hadBufferDesync
         history.clear()
         specialChar.removeAll()
         spaceCount = 0
-        // Set desync flag to disable spellcheck/restore until new session
-        bufferDesyncDetected = true
-        logCallback?("clearWithoutRestore: Session cleared due to desync, bufferDesyncDetected=true")
+        cursorMovedSinceReset = true
+        logCallback?("clearWithoutRestore: Session cleared due to uncertain context")
     }
     
 
     // MARK: - Normal Key Handling
     
     private func handleNormalKey(keyCode: UInt16, character: Character, isCaps: Bool) {
+
+        if selectedReplacementVetoed {
+            hookState.code = UInt8(vDoNothing)
+            hookState.backspaceCount = 0
+            hookState.newCharCount = 0
+            hookState.extCode = 3
+            insertKey(keyCode: keyCode, isCaps: isCaps, isCheckSpelling: false)
+            if vUseMacro == 1 {
+                hookState.macroKey.append(UInt32(keyCode) | (isCaps ? VNEngine.CAPS_MASK : 0))
+            }
+            upperCaseStatus = 0
+            return
+        }
 
         if willTempOffEngine {
             hookState.code = UInt8(vDoNothing)
@@ -715,6 +753,7 @@ class VNEngine {
                 saveWord()
             }
             buffer.clear()
+            selectionProofActive = false
             tempDisableKey = false
             hookState.extCode = 3
             specialChar.append(UInt32(keyCode) | (isCaps ? VNEngine.CAPS_MASK : 0))
@@ -3026,6 +3065,7 @@ class VNEngine {
 
     /// Restore last word from history
     func restoreLastTypingState() {
+        guard !selectionProofActive else { return }
         typingRevision &+= 1
         witnessedMarkCancellation = false
         logCallback?("restoreLastTypingState: history.count=\(history.count)")
@@ -3064,6 +3104,7 @@ class VNEngine {
     /// Start a new typing session
     func startNewSession() {
         typingRevision &+= 1
+        selectionProofActive = false
         literalUntilWordBreak = false
         witnessedMarkCancellation = false
         focusChangedDuringTyping = false
@@ -3282,15 +3323,46 @@ class VNEngine {
         }
     }
 
-    /// Apply only a bounded, collapsed-selection observation from the current revision.
-    func recoverCaretWord(_ report: CaretWordReport) -> RecoveryOutcome {
+    func invalidateSelectedSuffixProof() {
+        guard selectionProofActive else { return }
+        clearWithoutRestore()
+        upperCaseStatus = 0
+    }
+
+    private func selectionShapeRejection(_ report: CaretWordReport, nativeBackspaceProof: Bool) -> RecoveryRejection? {
+        switch report.proofKind {
+        case .collapsedCaret:
+            guard report.selectionAnchoredAtCaret && report.selectionLength == 0 else {
+                return .selectionNotAnchored
+            }
+        case .selectedSuffixReplacement(let length):
+            guard !nativeBackspaceProof, length > 0, length == report.selectionLength,
+                  !report.selectionAnchoredAtCaret else {
+                return .selectionNotAnchored
+            }
+            guard !report.word.isEmpty, !buffer.isEmpty, !buffer.hasOverflow else {
+                return .engineHasPartialWord
+            }
+        }
+        return nil
+    }
+
+    private func recordSelectionProof(_ kind: CaretWordProofKind) {
+        if case .selectedSuffixReplacement = kind {
+            selectionProofActive = true
+        }
+    }
+
+    /// Apply a bounded observation from the current revision without importing text.
+    func recoverCaretWord(_ report: CaretWordReport, nativeBackspaceProof: Bool = false) -> RecoveryOutcome {
         guard report.expectedRevision == typingRevision else { return .rejected(.staleRevision) }
-        guard report.selectionAnchoredAtCaret && report.selectionLength == 0 else {
-            return .rejected(.selectionNotAnchored)
+        if let rejection = selectionShapeRejection(report, nativeBackspaceProof: nativeBackspaceProof) {
+            return .rejected(rejection)
         }
         guard report.caretAtWordEnd else { return .rejected(.midWordCaret) }
         guard vCodeTable == 0 else { return .notApplicable }
-        guard report.word.unicodeScalars.elementsEqual(report.word.precomposedStringWithCanonicalMapping.unicodeScalars),
+        guard report.word.unicodeScalars.elementsEqual(
+                report.word.precomposedStringWithCanonicalMapping.unicodeScalars),
               let parsed = CaretWordParser.parse(leftContext: report.word, rightContext: "",
                   leftContextStartsAtFieldStart: true, rightContextEndsAtFieldEnd: true),
               parsed.word.unicodeScalars.elementsEqual(report.word.unicodeScalars) else {
@@ -3302,10 +3374,14 @@ class VNEngine {
             }
             cursorMovedSinceReset = false
             focusChangedDuringTyping = false
+            recordSelectionProof(report.proofKind)
             typingRevision &+= 1
             return .validated
         }
         guard report.word.isEmpty else { return .rejected(.wordMismatch) }
+        guard !nativeBackspaceProof || report.caretAtFieldStart || report.fieldIsEmpty else {
+            return .rejected(.wordMismatch)
+        }
         guard history.count > 0 || !specialChar.isEmpty || spaceCount > 0 ||
                 cursorMovedSinceReset || focusChangedDuringTyping else { return .notApplicable }
         // A proven empty boundary cannot validate old history; discard it before resuming.
@@ -3434,6 +3510,7 @@ extension VNEngine {
     /// Undo Vietnamese typing - restore original keystrokes in actual typing order
     /// Example: "manager" typed as m-a-n-a-g-e-r → engine shows "mângẻ" → undo restores "manager"
     func undoTyping() -> ProcessResult {
+        guard !selectedReplacementVetoed else { return .doNothing }
         typingRevision &+= 1
         logCallback?("undoTyping: index=\(index), stateIndex=\(stateIndex)")
 
@@ -3509,6 +3586,26 @@ extension VNEngine {
         // after sentence-ending punctuation that triggers macro or restore.
         defer { updateUpperCaseStatus(character: character) }
         defer { witnessedMarkCancellation = false }
+        defer { selectionProofActive = false }
+
+        if selectedReplacementVetoed {
+            hookState = HookState()
+            if spaceCount > 0 {
+                saveWord(keyCode: VietnameseData.KEY_SPACE, count: spaceCount)
+                spaceCount = 0
+            }
+            saveWord()
+            if character == "\n" || character == "\r" {
+                reset()
+            } else {
+                startNewSession()
+                spaceCount = 1
+            }
+            vCheckSpelling = useSpellCheckingBefore ? 1 : 0
+            willTempOffEngine = false
+            cursorMovedSinceReset = false
+            return .doNothing
+        }
 
         // Only trigger macro on SPACE - not on other word break characters
         // This prevents macros like "you@" from triggering immediately when typing "@"

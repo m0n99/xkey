@@ -89,6 +89,7 @@
 		FELAZY0001 /* FocusedElementInfoLazyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FELAZY0002 /* FocusedElementInfoLazyTests.swift */; };
 		WTRES00001 /* WindowTitleResolutionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WTRES00002 /* WindowTitleResolutionTests.swift */; };
 		AXOFFM0001 /* AXPassOffMainThreadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AXOFFM0002 /* AXPassOffMainThreadTests.swift */; };
+		BSPRF00001 /* BackspaceProofSchedulingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BSPRF00002 /* BackspaceProofSchedulingTests.swift */; };
 		CARETAX002 /* CaretWordAXReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARETAX001 /* CaretWordAXReader.swift */; };
 		CARETAX003 /* CaretWordAXReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARETAX001 /* CaretWordAXReader.swift */; };
 		CARETCO002 /* CaretWordRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARETCO001 /* CaretWordRecovery.swift */; };
@@ -302,6 +303,7 @@
 		FELAZY0002 /* FocusedElementInfoLazyTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FocusedElementInfoLazyTests.swift; sourceTree = "<group>"; };
 		WTRES00002 /* WindowTitleResolutionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WindowTitleResolutionTests.swift; sourceTree = "<group>"; };
 		AXOFFM0002 /* AXPassOffMainThreadTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AXPassOffMainThreadTests.swift; sourceTree = "<group>"; };
+		BSPRF00002 /* BackspaceProofSchedulingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BackspaceProofSchedulingTests.swift; sourceTree = "<group>"; };
 		CARETAX001 /* CaretWordAXReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaretWordAXReader.swift; sourceTree = "<group>"; };
 		CARETCO001 /* CaretWordRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaretWordRecovery.swift; sourceTree = "<group>"; };
 		CARETTT001 /* CaretRecoveryTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaretRecoveryTransportTests.swift; sourceTree = "<group>"; };
@@ -723,6 +725,7 @@
 				FELAZY0002 /* FocusedElementInfoLazyTests.swift */,
 				WTRES00002 /* WindowTitleResolutionTests.swift */,
 				AXOFFM0002 /* AXPassOffMainThreadTests.swift */,
+				BSPRF00002 /* BackspaceProofSchedulingTests.swift */,
 				CARETTT001 /* CaretRecoveryTransportTests.swift */,
 				CARETET001 /* CaretWordRecoveryTests.swift */,
 				APPPOL00004 /* AppPolicyRuntimeTests.swift */,
@@ -1105,6 +1108,7 @@
 				FELAZY0001 /* FocusedElementInfoLazyTests.swift in Sources */,
 				WTRES00001 /* WindowTitleResolutionTests.swift in Sources */,
 				AXOFFM0001 /* AXPassOffMainThreadTests.swift in Sources */,
+				BSPRF00001 /* BackspaceProofSchedulingTests.swift in Sources */,
 				CARETTT002 /* CaretRecoveryTransportTests.swift in Sources */,
 				CARETET002 /* CaretWordRecoveryTests.swift in Sources */,
 				APPPOL00005 /* AppPolicyRuntimeTests.swift in Sources */,

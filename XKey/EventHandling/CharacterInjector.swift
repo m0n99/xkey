@@ -38,6 +38,9 @@ class CharacterInjector {
     // Debug callback
     var debugCallback: ((String) -> Void)?
 
+    /// Test seam: observes events instead of posting them to the live event stream.
+    var eventPostObserver: ((CGEvent) -> Void)?
+
     /// Whether this host must keep the event-tap callback free while it injects.
     ///
     /// XKeyIM runs its tap on the main run loop of the process that is also the active
@@ -65,7 +68,9 @@ class CharacterInjector {
     private func postInjected(_ event: CGEvent,
                               proxy: CGEventTapProxy?,
                               useDirectPost: Bool) -> Bool {
-        if useDirectPost {
+        if let eventPostObserver {
+            eventPostObserver(event)
+        } else if useDirectPost {
             event.post(tap: .cgSessionEventTap)
         } else if let proxy {
             event.tapPostEvent(proxy)
@@ -171,15 +176,19 @@ class CharacterInjector {
         return backspaceCount == 0 || !needsForwardDelete()
     }
 
-    func inject(backspaceCount: Int, characters: [VNCharacter], codeTable: CodeTable, proxy: CGEventTapProxy) {
-        let methodInfo = AppBehaviorDetector.shared.getConfirmedInjectionMethod()
+    func inject(backspaceCount: Int, characters: [VNCharacter], codeTable: CodeTable, proxy: CGEventTapProxy,
+                selectionNormalizationProfile: SelectedSuffixInjectionProfile? = nil) {
+        let methodInfo = selectionNormalizationProfile?.methodInfo
+            ?? AppBehaviorDetector.shared.getConfirmedInjectionMethod()
+        precondition(selectionNormalizationProfile == nil || codeTable == .unicode)
         let canRunDirectAsync = Self.canRunDirectAsync(
             method: methodInfo.method,
             needsEmptyCharPrefix: methodInfo.needsEmptyCharPrefix,
             textSendingMethod: methodInfo.textSendingMethod,
             backspaceCount: backspaceCount,
             prefersAsyncDirectInjection: prefersAsyncDirectInjection,
-            needsForwardDelete: AppBehaviorDetector.shared.needsForwardDeleteWithAXCheck
+            needsForwardDelete: selectionNormalizationProfile == nil
+                && AppBehaviorDetector.shared.needsForwardDeleteWithAXCheck
         )
 
         guard canRunDirectAsync else {

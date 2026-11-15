@@ -24,9 +24,11 @@ final class CaretWordRecoveryTests: XCTestCase {
     }
 
     private func assertRestores(_ engine: VNEngine, file: StaticString = #filePath, line: UInt = #line) {
+        engine.vRestoreIfWrongSpelling = 0
         type("etsy", into: engine)
         XCTAssertEqual(engine.getCurrentWord(), "éty", file: file, line: line)
         engine.vCheckSpelling = 1
+        engine.vRestoreIfWrongSpelling = 1
         let result = engine.processWordBreak(character: ".")
         XCTAssertTrue(result.shouldConsume, file: file, line: line)
         XCTAssertEqual(result.backspaceCount, 3, file: file, line: line)

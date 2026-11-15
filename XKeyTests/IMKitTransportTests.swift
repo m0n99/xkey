@@ -780,10 +780,13 @@ private final class ParityInjectionSink: CGEventInjectionSink {
     var debugCallback: ((String) -> Void)?
     var text = ""
 
+    func captureSelectionNormalizationProfile() -> SelectedSuffixInjectionProfile? { nil }
+
     func inject(backspaceCount: Int,
                 characters: [VNCharacter],
                 codeTable: CodeTable,
-                proxy: CGEventTapProxy?) {
+                proxy: CGEventTapProxy?,
+                selectionNormalizationProfile: SelectedSuffixInjectionProfile?) {
         text.removeLast(min(backspaceCount, text.count))
         text += characters.map { $0.unicode(codeTable: codeTable) }.joined()
     }

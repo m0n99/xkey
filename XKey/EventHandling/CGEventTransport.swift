@@ -1,12 +1,25 @@
 import CoreGraphics
 
+struct SelectedSuffixInjectionProfile {
+    let methodInfo: InjectionMethodInfo
+
+    init?(methodInfo: InjectionMethodInfo) {
+        guard methodInfo.method == .fast || methodInfo.method == .slow,
+              methodInfo.needsEmptyCharPrefix,
+              methodInfo.textSendingMethod != .paste else { return nil }
+        self.methodInfo = methodInfo
+    }
+}
+
 protocol CGEventInjectionSink: AnyObject {
     var debugCallback: ((String) -> Void)? { get set }
     var prefersAsyncDirectInjection: Bool { get set }
+    func captureSelectionNormalizationProfile() -> SelectedSuffixInjectionProfile?
     func inject(backspaceCount: Int,
                 characters: [VNCharacter],
                 codeTable: CodeTable,
-                proxy: CGEventTapProxy?)
+                proxy: CGEventTapProxy?,
+                selectionNormalizationProfile: SelectedSuffixInjectionProfile?)
     func waitForInjectionComplete()
     func markNewSession(cursorMoved: Bool, preserveMidSentence: Bool)
     func resetMidSentenceFlag()
@@ -14,10 +27,15 @@ protocol CGEventInjectionSink: AnyObject {
 }
 
 extension CharacterInjector: CGEventInjectionSink {
+    func captureSelectionNormalizationProfile() -> SelectedSuffixInjectionProfile? {
+        SelectedSuffixInjectionProfile(methodInfo: AppBehaviorDetector.shared.getConfirmedInjectionMethod())
+    }
+
     func inject(backspaceCount: Int,
                 characters: [VNCharacter],
                 codeTable: CodeTable,
-                proxy: CGEventTapProxy?) {
+                proxy: CGEventTapProxy?,
+                selectionNormalizationProfile: SelectedSuffixInjectionProfile?) {
         guard let proxy else {
             assertionFailure("A tap proxy is required for CharacterInjector")
             return
@@ -25,7 +43,8 @@ extension CharacterInjector: CGEventInjectionSink {
         inject(backspaceCount: backspaceCount,
                characters: characters,
                codeTable: codeTable,
-               proxy: proxy)
+               proxy: proxy,
+               selectionNormalizationProfile: selectionNormalizationProfile)
     }
 }
 
@@ -47,6 +66,10 @@ final class CGEventTransport {
     var prefersAsyncDirectInjection: Bool {
         get { sink.prefersAsyncDirectInjection }
         set { sink.prefersAsyncDirectInjection = newValue }
+    }
+
+    func captureSelectionNormalizationProfile() -> SelectedSuffixInjectionProfile? {
+        sink.captureSelectionNormalizationProfile()
     }
 
     func normalize(_ event: CGEvent, type: CGEventType) -> InputEvent? {
@@ -78,7 +101,8 @@ final class CGEventTransport {
     func apply(_ action: InputAction,
                event: InputEvent,
                originalEvent: CGEvent,
-               proxy: CGEventTapProxy?) -> CGEvent? {
+               proxy: CGEventTapProxy?,
+               selectionNormalizationProfile: SelectedSuffixInjectionProfile? = nil) -> CGEvent? {
         let isPlainReturn = event.kind == .keyDown
             && event.keyCode == VietnameseData.KEY_RETURN
             && event.modifiers.intersection([.command, .control, .option]).isEmpty
@@ -93,7 +117,8 @@ final class CGEventTransport {
             sink.inject(backspaceCount: replacement.backspaces,
                         characters: replacement.characters,
                         codeTable: replacement.codeTable,
-                        proxy: proxy)
+                        proxy: proxy,
+                        selectionNormalizationProfile: selectionNormalizationProfile)
             if event.kind == .undo {
                 sink.markNewSession(cursorMoved: false, preserveMidSentence: true)
             }

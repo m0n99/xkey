@@ -269,6 +269,25 @@ final class TapEventSource {
 
     var recoveryEligibilityForTesting: (() -> Bool)?
     var onRecoveryScheduledForTesting: ((UInt64) -> Void)?
+    var onBackspaceProofScheduledForTesting: ((UInt64) -> Void)?
+    var axPassReadForTesting: ((UInt64, UInt64?, Bool) -> (AXSnapshot, CaretWordReport?))?
+
+    private struct BackspaceProofToken {
+        let id: UInt64
+        let epoch: UInt64
+        let pid: pid_t
+        let bundleId: String?
+        var ready: Bool
+    }
+    private var backspaceProofToken: BackspaceProofToken?
+    private var backspaceProofSequence: UInt64 = 0
+    private var backspaceProofWorkItem: DispatchWorkItem?
+    private var backspaceProofDeadline: DispatchTime = .now()
+    private var cachedProofPID: pid_t?
+    private var cachedProofBundleId: String?
+    var backspaceProofIdentityForTesting: (() -> (pid_t?, String?))?
+    var backspaceProofQueueBusyForTesting = false
+    var hasPendingBackspaceProofForTesting: Bool { backspaceProofToken != nil }
 
     private struct RecoveryTrigger {
         let revision: UInt64
@@ -299,6 +318,7 @@ final class TapEventSource {
         let recoveryEpoch: UInt64
         let appPID: pid_t?
         let appBundleId: String?
+        let isBackspaceProof: Bool
         /// Takes the source rather than capturing it, so a queued pass never keeps a
         /// released source alive past its deinit.
         let apply: (TapEventSource, AXSnapshot) -> Void
@@ -347,6 +367,9 @@ final class TapEventSource {
     func start() {
         guard !isRunning else { return }
         isRunning = true
+        let frontApp = NSWorkspace.shared.frontmostApplication
+        recordFrontmostApplicationIdentity(pid: frontApp?.processIdentifier, bundleId: frontApp?.bundleIdentifier)
+        installBackspaceProofCallback()
 
         // Listen for app activation changes to reset engine buffer
         // This prevents buffer from previous app affecting typing in new app
@@ -357,12 +380,14 @@ final class TapEventSource {
         ) { [weak self] notification in
             guard let self = self else { return }
             self.recoveryEpoch &+= 1
+            self.cancelBackspaceProof()
 
             // Record the new frontmost app for per-keystroke exclusion checks.
             // The bundle ID comes straight from the notification's userInfo — no
             // extra IPC. nil falls back to a live NSWorkspace query per keystroke.
             let activatedApp = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-            self.handler.noteFrontmostApp(bundleId: activatedApp?.bundleIdentifier)
+            self.recordFrontmostApplicationIdentity(pid: activatedApp?.processIdentifier,
+                                                    bundleId: activatedApp?.bundleIdentifier)
 
             // Inactive host still observes activation to keep its cheap bundle cache fresh,
             // but owns no typing state and must not reset or apply policy.
@@ -490,8 +515,9 @@ final class TapEventSource {
             forName: NSWorkspace.didDeactivateApplicationNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
-            self?.handler.noteFrontmostApp(bundleId: nil)
+        ) { [weak self] notification in
+            let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            self?.handleApplicationDeactivation(pid: app?.processIdentifier)
         }
 
         // AXObserver focus/title monitoring, relocated from AppDelegate (Task 7).
@@ -511,9 +537,31 @@ final class TapEventSource {
         publishAppContext(appliesSmartSwitch: true)
     }
 
+    // Main thread only; this identity is an anchor, not proof of the current app.
+    func recordFrontmostApplicationIdentity(pid: pid_t?, bundleId: String?) {
+        guard isRunning else { return }
+        if cachedProofPID != pid || cachedProofBundleId != bundleId {
+            cancelBackspaceProof()
+        }
+        cachedProofPID = pid
+        cachedProofBundleId = bundleId
+        handler.noteFrontmostApp(bundleId: bundleId)
+    }
+
+    func handleApplicationDeactivation(pid: pid_t?) {
+        guard isRunning else { return }
+        if let pid = pid, pid != cachedProofPID { return }
+        recordFrontmostApplicationIdentity(pid: nil, bundleId: nil)
+        cancelBackspaceProof()
+    }
+
     func stop() {
         guard isRunning else { return }
         isRunning = false
+        handler.onNativeBackspacePassedThrough = nil
+        cancelBackspaceProof()
+        cachedProofPID = nil
+        cachedProofBundleId = nil
 
         // Drop every AX pass this source has in flight, and the one waiting behind it.
         // Bumping the generation is what the main-thread stage checks, so an in-flight
@@ -580,18 +628,27 @@ final class TapEventSource {
     ///   - element: the element to snapshot, or nil to snapshot whatever is focused when
     ///     the pass runs
     ///   - apply: the main-thread stage
-    private func scheduleAXPass(element: AXUIElement?, recoveryRevision: UInt64? = nil,
-                                 apply: @escaping (TapEventSource, AXSnapshot) -> Void) {
+    private func scheduleAXPass(
+        element: AXUIElement?, recoveryRevision: UInt64? = nil,
+        isBackspaceProof: Bool = false,
+        proofAnchor: (pid: pid_t, bundleId: String?)? = nil,
+        apply: @escaping (TapEventSource, AXSnapshot) -> Void
+    ) {
         // Ownership is checked here and again after the hop: a pass costs AX round-trips
         // into the target app, and while another process owns the keystroke path it
         // would only duplicate that process's (Task 9b).
         guard isActiveHost() else { return }
 
         axPassGeneration &+= 1
-        let app = NSWorkspace.shared.frontmostApplication
+        let app = proofAnchor == nil ? NSWorkspace.shared.frontmostApplication : nil
+        if proofAnchor == nil {
+            recordFrontmostApplicationIdentity(pid: app?.processIdentifier, bundleId: app?.bundleIdentifier)
+        }
         let pass = PendingAXPass(generation: axPassGeneration, element: element,
                                  recoveryRevision: recoveryRevision, recoveryEpoch: recoveryEpoch,
-                                 appPID: app?.processIdentifier, appBundleId: app?.bundleIdentifier,
+                                 appPID: proofAnchor?.pid ?? app?.processIdentifier,
+                                 appBundleId: proofAnchor == nil ? app?.bundleIdentifier : proofAnchor?.bundleId,
+                                 isBackspaceProof: isBackspaceProof,
                                  apply: apply)
 
         guard !axPassInFlight else {
@@ -607,13 +664,14 @@ final class TapEventSource {
         // Read on the main thread and carried in, so the queue never touches NSWorkspace:
         // the frontmost app is AppKit state. Pinning it here also ties the window title
         // and the DOM-attribute gate to the app that was frontmost when the pass started.
-        let appElement = pass.appPID.map { AXUIElementCreateApplication($0) }
+        let readOverride = axPassReadForTesting
+        let appElement = readOverride == nil ? pass.appPID.map { AXUIElementCreateApplication($0) } : nil
         let bundleId = pass.appBundleId
 
         // Only the overlay probe's AX read moves; its decision half and its apply half
         // stay on this thread, on either side of the hop. nil means no read is needed —
         // the cached overlay state is already the answer.
-        let probe = OverlayAppDetector.shared.beginProbe()
+        let probe = readOverride == nil ? OverlayAppDetector.shared.beginProbe() : nil
 
         // hasCaret is one AX round-trip that only the host's toolbar reads. XKeyIM wires
         // no toolbar callback, so it does not pay for it.
@@ -622,35 +680,59 @@ final class TapEventSource {
         axPassQueue.async { [weak self] in
             let focusedInfo: AppBehaviorDetector.FocusedElementInfo
             let hasFocusedElement: Bool
-            let focusedElement: AXUIElement?
-            if pass.recoveryRevision != nil, let appElement = appElement {
-                var value: CFTypeRef?
-                if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &value) == .success,
-                   let value = value, CFGetTypeID(value) == AXUIElementGetTypeID() {
-                    focusedElement = (value as! AXUIElement)
-                } else {
-                    focusedElement = nil
-                }
-            } else {
-                focusedElement = pass.element ?? AXHelper.getFocusedElement()
-            }
-            if let element = focusedElement {
-                focusedInfo = .from(element, appElement: appElement)
-                hasFocusedElement = true
-            } else {
-                focusedInfo = .withoutFocusedElement(appElement: appElement)
-                hasFocusedElement = false
-            }
-            focusedInfo.materialise(bundleId: bundleId, includingCaret: needsCaret)
             let recoveryReport: CaretWordReport?
-            if let revision = pass.recoveryRevision, let element = focusedElement, let appElement = appElement {
-                recoveryReport = CaretWordAXReader.read(CaretWordAXReader.provider(element: element, appElement: appElement),
-                                                        signature: focusedInfo.signature, bundleId: bundleId,
-                                                        revision: revision)
+            let readerDiagnostic: String?
+            let probedOverlayName: String?
+            let testSnapshot: AXSnapshot?
+            if let readOverride = readOverride {
+                let (snapshot, report) = readOverride(pass.generation, pass.recoveryRevision, pass.isBackspaceProof)
+                testSnapshot = snapshot
+                focusedInfo = snapshot.focusedInfo
+                hasFocusedElement = snapshot.hasFocusedElement
+                recoveryReport = report
+                readerDiagnostic = nil
+                probedOverlayName = nil
             } else {
-                recoveryReport = nil
+                testSnapshot = nil
+                let focusedElement: AXUIElement?
+                if pass.recoveryRevision != nil, let appElement = appElement {
+                    var value: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &value) == .success,
+                       let value = value, CFGetTypeID(value) == AXUIElementGetTypeID() {
+                        focusedElement = (value as! AXUIElement)
+                    } else {
+                        focusedElement = nil
+                    }
+                } else {
+                    focusedElement = pass.element ?? AXHelper.getFocusedElement()
+                }
+                if let element = focusedElement {
+                    focusedInfo = .from(element, appElement: appElement)
+                    hasFocusedElement = true
+                } else {
+                    focusedInfo = .withoutFocusedElement(appElement: appElement)
+                    hasFocusedElement = false
+                }
+                focusedInfo.materialise(bundleId: bundleId, includingCaret: needsCaret)
+                var recoveryDiagnostic: String?
+                if let revision = pass.recoveryRevision, let element = focusedElement, let appElement = appElement {
+                    // materialise resolves domClasses for AXTextField above; the role gate
+                    // prevents this access from resolving the lazy property for other roles.
+                    let canUseOmniboxMetadata = !pass.isBackspaceProof && focusedInfo.role == "AXTextField"
+                    let metadata: CaretWordAXReader.OmniboxMetadata? = canUseOmniboxMetadata
+                        ? .init(role: focusedInfo.role, description: focusedInfo.description,
+                                domClassList: focusedInfo.domClasses)
+                        : nil
+                    recoveryReport = CaretWordAXReader.read(CaretWordAXReader.provider(element: element, appElement: appElement),
+                                                            signature: focusedInfo.signature, bundleId: bundleId,
+                                                            revision: revision, omniboxMetadata: metadata,
+                                                            diagnostic: { recoveryDiagnostic = $0 })
+                } else {
+                    recoveryReport = nil
+                }
+                readerDiagnostic = recoveryDiagnostic
+                probedOverlayName = probe == nil ? nil : OverlayAppDetector.shared.readOverlayNameViaAX()
             }
-            let probedOverlayName = probe == nil ? nil : OverlayAppDetector.shared.readOverlayNameViaAX()
 
             DispatchQueue.main.async {
                 // Ahead of every guard below, `guard let self` included, because
@@ -683,31 +765,88 @@ final class TapEventSource {
                 guard let self = self else { return }
                 self.axPassInFlight = false
                 defer { self.runPendingAXPass() }
+                self.logRecoveryRead(pass, focusedInfo: focusedInfo, hasFocusedElement: hasFocusedElement,
+                                     report: recoveryReport, diagnostic: readerDiagnostic)
 
                 // Dropped rather than applied once a newer pass has been scheduled —
                 // including by stop(), which bumps the generation for exactly this
                 // reason, so nothing in flight can land on a source that has been torn
                 // down or on a host that has already yielded.
-                guard isCurrent else { return }
+                guard isCurrent else {
+                    self.logStaleAXPass(pass)
+                    return
+                }
 
                 // Ownership can flip while a pass is in flight.
-                guard self.isActiveHost() else { return }
+                guard self.isActiveHost() else {
+                    self.logInactiveAXPass(pass)
+                    return
+                }
 
-                let snapshot = AXSnapshot(generation: pass.generation, focusedInfo: focusedInfo,
-                                          hasFocusedElement: hasFocusedElement,
-                                          overlayName: OverlayAppDetector.shared.lastKnownOverlayName)
+                let snapshot = testSnapshot ?? AXSnapshot(generation: pass.generation, focusedInfo: focusedInfo,
+                                                          hasFocusedElement: hasFocusedElement,
+                                                          overlayName: OverlayAppDetector.shared.lastKnownOverlayName)
                 pass.apply(self, snapshot)
                 let expected = CaretRecoveryFreshness(revision: pass.recoveryRevision ?? 0,
                                                       epoch: pass.recoveryEpoch, generation: pass.generation,
                                                       isRunning: true, isActiveHost: true)
                 let frontApp = NSWorkspace.shared.frontmostApplication
+                self.logRecoveryApply(pass, expected: expected, report: recoveryReport, frontApp: frontApp)
                 // Observer signatures may describe autocomplete, not the app's focused editor.
                 CaretRecoveryFreshness.applyIfCurrent(report: recoveryReport, expected: expected,
                     current: self.recoveryFreshness, expectedPID: pass.appPID,
                     currentPID: frontApp?.processIdentifier, expectedBundleId: pass.appBundleId,
                     currentBundleId: frontApp?.bundleIdentifier) {
-                    _ = self.handler.recoverCaretWord($0)
+                    let outcome = self.handler.recoverCaretWord($0, nativeBackspaceProof: pass.isBackspaceProof)
+                    self.onLogEvent?("Caret recovery outcome: \(outcome)")
                 }
+            }
+        }
+    }
+
+    private func logRecoveryRead(_ pass: PendingAXPass, focusedInfo: AppBehaviorDetector.FocusedElementInfo,
+                                 hasFocusedElement: Bool, report: CaretWordReport?, diagnostic: String?) {
+        if let revision = pass.recoveryRevision {
+            let reason = diagnostic ?? (report == nil ? "focusedElementOrAppUnavailable" : "ok")
+            onLogEvent?("Caret recovery read: revision=\(revision) epoch=\(pass.recoveryEpoch) " +
+                        "generation=\(pass.generation) focused=\(hasFocusedElement) " +
+                        "role=\(focusedInfo.role ?? "unavailable") diagnostic=\(reason) " +
+                        "proofKind=\(report.map { String(describing: $0.proofKind) } ?? "unavailable") " +
+                        "selectionLength=\(report.map { String($0.selectionLength) } ?? "unavailable")")
+        }
+    }
+
+    private func logStaleAXPass(_ pass: PendingAXPass) {
+        if pass.recoveryRevision != nil {
+            onLogEvent?("Caret recovery apply rejected: stale generation " +
+                        "expected=\(pass.generation) current=\(axPassGeneration)")
+        } else {
+            onLogEvent?("AX context pass dropped before recovery bookkeeping: stale generation " +
+                        "expected=\(pass.generation) current=\(axPassGeneration)")
+        }
+    }
+
+    private func logInactiveAXPass(_ pass: PendingAXPass) {
+        if pass.recoveryRevision != nil {
+            onLogEvent?("Caret recovery apply rejected: inactive owner")
+        } else {
+            onLogEvent?("AX context pass dropped before recovery bookkeeping: inactive owner")
+        }
+    }
+
+    private func logRecoveryApply(_ pass: PendingAXPass, expected: CaretRecoveryFreshness,
+                                  report: CaretWordReport?, frontApp: NSRunningApplication?) {
+        if pass.recoveryRevision != nil {
+            let current = recoveryFreshness
+            if report == nil {
+                onLogEvent?("Caret recovery apply: nil report (unreadable)")
+            } else if !expected.matches(current) || pass.appPID == nil ||
+                        pass.appPID != frontApp?.processIdentifier || pass.appBundleId != frontApp?.bundleIdentifier {
+                let pidMatch = pass.appPID != nil && pass.appPID == frontApp?.processIdentifier
+                let bundleMatch = pass.appBundleId == frontApp?.bundleIdentifier
+                onLogEvent?("Caret recovery apply rejected: stale/owner " +
+                            "expected=\(describeFreshness(expected)) current=\(describeFreshness(current)) " +
+                            "pidMatch=\(pidMatch) bundleMatch=\(bundleMatch)")
             }
         }
     }
@@ -716,13 +855,136 @@ final class TapEventSource {
     /// Main thread only. A pass applied from `apply` may itself schedule one, so this
     /// must not start a second pass while that one is running.
     private func runPendingAXPass() {
-        guard !axPassInFlight, let pass = pendingAXPass else { return }
+        guard !axPassInFlight, !backspaceProofQueueBusyForTesting else { return }
+        guard let pass = pendingAXPass else {
+            drainBackspaceProof()
+            return
+        }
         pendingAXPass = nil
         // Re-checked for the same reason scheduleAXPass checks it: this pass was
         // scheduled a whole AX round-trip ago, and its reads are worth nothing if
         // another process has taken the keystroke path since.
-        guard isActiveHost() else { return }
+        guard isActiveHost() else {
+            cancelBackspaceProof()
+            return
+        }
         runAXPass(pass)
+    }
+
+    private func installBackspaceProofCallback() {
+        handler.onNativeBackspacePassedThrough = { [weak self] in
+            self?.enqueueBackspaceProof()
+        }
+    }
+
+    private func logBackspaceProofLater(_ message: String) {
+        DispatchQueue.main.async { [weak self] in self?.onLogEvent?(message) }
+    }
+
+    private func enqueueBackspaceProof() {
+        guard isRunning else {
+            cancelBackspaceProof()
+            logBackspaceProofLater("Native Backspace proof skipped: stopped")
+            return
+        }
+        guard let pid = cachedProofPID else {
+            cancelBackspaceProof()
+            logBackspaceProofLater("Native Backspace proof skipped: cached identity unavailable")
+            return
+        }
+        if let token = backspaceProofToken,
+           token.epoch != recoveryEpoch || token.pid != pid || token.bundleId != cachedProofBundleId {
+            cancelBackspaceProof()
+            logBackspaceProofLater("Native Backspace proof skipped: cached identity changed")
+            return
+        }
+        if backspaceProofToken == nil {
+            backspaceProofSequence &+= 1
+            backspaceProofToken = BackspaceProofToken(id: backspaceProofSequence, epoch: recoveryEpoch,
+                                                      pid: pid, bundleId: cachedProofBundleId, ready: false)
+            logBackspaceProofLater("Native Backspace proof enqueued")
+        }
+        backspaceProofToken?.ready = false
+        backspaceProofDeadline = .now() + 0.05
+        if backspaceProofWorkItem == nil, let id = backspaceProofToken?.id {
+            scheduleBackspaceSettle(id: id, deadline: backspaceProofDeadline)
+        }
+    }
+
+    private func scheduleBackspaceSettle(id: UInt64, deadline: DispatchTime) {
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, self.backspaceProofToken?.id == id else { return }
+            self.backspaceProofWorkItem = nil
+            if DispatchTime.now() < self.backspaceProofDeadline {
+                self.scheduleBackspaceSettle(id: id, deadline: self.backspaceProofDeadline)
+            } else {
+                self.settleBackspaceProof(id: id)
+            }
+        }
+        backspaceProofWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: deadline, execute: work)
+    }
+
+    private func settleBackspaceProof(id: UInt64) {
+        guard backspaceProofToken?.id == id else { return }
+        backspaceProofToken?.ready = true
+        runPendingAXPass()
+    }
+
+    private func cancelBackspaceProof() {
+        backspaceProofWorkItem?.cancel()
+        backspaceProofWorkItem = nil
+        backspaceProofToken = nil
+    }
+
+    private func drainBackspaceProof() {
+        guard let token = backspaceProofToken, token.ready else { return }
+        cancelBackspaceProof()
+        let identity: (pid_t?, String?)
+        if let override = backspaceProofIdentityForTesting {
+            identity = override()
+        } else {
+            let app = NSWorkspace.shared.frontmostApplication
+            identity = (app?.processIdentifier, app?.bundleIdentifier)
+        }
+        guard isRunning, isActiveHost(), token.epoch == recoveryEpoch,
+              token.pid == identity.0, token.bundleId == identity.1 else {
+            onLogEvent?("Native Backspace proof skipped: stale identity or owner")
+            return
+        }
+        guard handler.needsBackspaceContextProof,
+              recoveryEligibilityForTesting?() ?? handler.canRecoverCaretWord else {
+            onLogEvent?("Native Backspace proof skipped: ineligible context")
+            return
+        }
+        let revision = handler.typingRevision
+        scheduleAXPass(element: nil, recoveryRevision: revision, isBackspaceProof: true,
+                       proofAnchor: (token.pid, token.bundleId)) { _, _ in }
+        onLogEvent?("Native Backspace proof scheduled: revision=\(revision) epoch=\(token.epoch)")
+        onBackspaceProofScheduledForTesting?(revision)
+    }
+
+    func startBackspaceProofForTesting(pid: pid_t, bundleId: String?) {
+        isRunning = true
+        recordFrontmostApplicationIdentity(pid: pid, bundleId: bundleId)
+        installBackspaceProofCallback()
+    }
+
+    func settleBackspaceProofForTesting() {
+        guard let id = backspaceProofToken?.id else { return }
+        backspaceProofWorkItem?.cancel()
+        backspaceProofWorkItem = nil
+        settleBackspaceProof(id: id)
+    }
+
+    func drainBackspaceProofForTesting() { runPendingAXPass() }
+
+    func stopBackspaceProofForTesting() {
+        isRunning = false
+        handler.onNativeBackspacePassedThrough = nil
+        cancelBackspaceProof()
+        cachedProofPID = nil
+        cachedProofBundleId = nil
     }
 
     // MARK: - Focus Change Monitoring
@@ -800,15 +1062,42 @@ final class TapEventSource {
         let expected = CaretRecoveryFreshness(revision: trigger.revision, epoch: trigger.epoch,
                                               generation: snapshot.generation, isRunning: true,
                                               isActiveHost: true)
-        return CaretRecoveryFreshness.afterBookkeeping(expected: expected,
-                                                      current: { self.recoveryFreshness },
-                                                      bookkeeping: bookkeeping)
+        var before: CaretRecoveryFreshness?
+        let result = CaretRecoveryFreshness.afterBookkeeping(expected: expected,
+                                                           current: {
+                                                               let current = self.recoveryFreshness
+                                                               if before == nil { before = current }
+                                                               return current
+                                                           },
+                                                           bookkeeping: bookkeeping)
+        if result == nil {
+            onLogEvent?("Caret recovery not scheduled: stale bookkeeping expected=\(describeFreshness(expected)) " +
+                        "before=\(before.map(describeFreshness) ?? "unavailable") " +
+                        "current=\(describeFreshness(recoveryFreshness))")
+        }
+        return result
+    }
+
+    private func describeFreshness(_ freshness: CaretRecoveryFreshness) -> String {
+        "revision=\(freshness.revision),epoch=\(freshness.epoch),generation=\(freshness.generation)," +
+            "running=\(freshness.isRunning),active=\(freshness.isActiveHost)"
     }
 
     private func scheduleCaretRecovery(freshness: CaretRecoveryFreshness) {
-        guard freshness.matches(recoveryFreshness),
-              pendingAXPass == nil, !axPassInFlight,
-              (recoveryEligibilityForTesting?() ?? handler.canRecoverCaretWord) else { return }
+        guard freshness.matches(recoveryFreshness) else {
+            onLogEvent?("Caret recovery not scheduled: stale expected=\(describeFreshness(freshness)) " +
+                        "current=\(describeFreshness(recoveryFreshness))")
+            return
+        }
+        guard pendingAXPass == nil, !axPassInFlight else {
+            onLogEvent?("Caret recovery not scheduled: busy pending=\(pendingAXPass != nil) " +
+                        "inFlight=\(axPassInFlight) \(describeFreshness(freshness))")
+            return
+        }
+        guard recoveryEligibilityForTesting?() ?? handler.canRecoverCaretWord else {
+            onLogEvent?("Caret recovery not scheduled: ineligible context \(describeFreshness(freshness))")
+            return
+        }
         scheduleAXPass(element: nil, recoveryRevision: freshness.revision) { _, _ in }
         onRecoveryScheduledForTesting?(freshness.revision)
     }
@@ -1009,6 +1298,7 @@ final class TapEventSource {
     /// to catch same-app context switches (tab/window) where signature stays the same
     /// but window title rules and injection method may change.
     func handleAXFocusChanged(_ element: AXUIElement) {
+        cancelBackspaceProof()
         let activeHost = isActiveHost()
         let accepted = CaretRecoveryFreshness.acceptFocusNotification(
             epoch: &recoveryEpoch, isActiveHost: activeHost,
@@ -1233,6 +1523,7 @@ final class TapEventSource {
             // Mark as cursor moved to disable autocomplete fix (avoid deleting text on right)
             self?.handler.resetWithCursorMoved()
             self?.recoveryEpoch &+= 1
+            self?.cancelBackspaceProof()
             let trigger = self.map { RecoveryTrigger(revision: $0.handler.typingRevision, epoch: $0.recoveryEpoch) }
 
             // Log detailed input detection info (ONLY when debug window is visible)
