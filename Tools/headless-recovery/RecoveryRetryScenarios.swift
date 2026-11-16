@@ -1,6 +1,7 @@
 import Foundation
 
 func runRecoveryRetryScenarios() {
+    guardedOwnedWordStartScenarios()
     let expected = CaretRecoveryFreshness(revision: 7, epoch: 2, generation: 3,
                                           isRunning: true, isActiveHost: true)
     let validReport = CaretWordReport(word: "word", caretAtWordEnd: true, selectionAnchoredAtCaret: true,
@@ -36,6 +37,48 @@ func runRecoveryRetryScenarios() {
     checkFreshProofPreservesRawKeys()
     checkFocusResolutionAndTransfer()
     checkFocusRecoveryEpisode()
+}
+
+func guardedOwnedWordStartScenarios() {
+    let data = VietnameseData()
+    func request(guarded: Bool = true, wasEmpty: Bool = true, isEmpty: Bool = false,
+                 key: UInt16 = VietnameseData.KEY_C, shortcut: Bool = false,
+                 selected: Bool = false, desynced: Bool = false, overflow: Bool = false) -> Bool {
+        CaretRecoveryFreshness.shouldRequestOwnedWordStart(
+            guardedBefore: guarded, wasEmpty: wasEmpty, isEmpty: isEmpty,
+            ordinaryLetter: !shortcut && data.isLetter(key), selectionProof: selected,
+            desynced: desynced, overflow: overflow)
+    }
+    check(request(), "guarded empty-to-owned letter requests proof")
+    check(!request(guarded: false) && !request(wasEmpty: false) && !request(isEmpty: true),
+          "unguarded, continuation and empty results do not request proof")
+    check(!request(shortcut: true) && !request(key: VietnameseData.KEY_DELETE) &&
+          !request(key: VietnameseData.keyCode(for: " ") ?? 49) &&
+          !request(key: VietnameseData.KEY_COMMA), "shortcut, delete, space and punctuation do not request proof")
+    check(!request(selected: true) && !request(desynced: true) && !request(overflow: true),
+          "suffix proof, desync and overflow do not request proof")
+
+    for fromBackspace in [false, true] {
+        let engine = makeEngine()
+        if fromBackspace { exhaustEmptyHistory(engine) } else { engine.cursorMovedSinceReset = true }
+        engine.vCheckSpelling = 1
+        engine.vRestoreIfWrongSpelling = 1
+        var screen = ""
+        press("c", engine: engine, screen: &screen)
+        let raw = engine.buffer.getKeystrokeSequence()
+        check(engine.recoverCaretWord(report("oldc", engine)) != .validated,
+              "generic proof rejects unowned prefix")
+        check(engine.recoverCaretWord(report(screen, engine)) == .validated &&
+              engine.buffer.getKeystrokeSequence() == raw, "generic exact owned word validates without changing raw keys")
+        for key in "ase" { press(key, engine: engine, screen: &screen) }
+        let result = engine.processWordBreak(character: " ")
+        check(result.shouldConsume && result.newCharacters.map { $0.unicode(codeTable: .unicode) }.joined() == "case ",
+              "owned word proof permits case restoration at boundary")
+    }
+    check(readContext("old", selection: CFRange(location: 1, length: 0)) == nil,
+          "reader rejects existing word suffix")
+    check(readContext("old", selection: CFRange(location: 1, length: 1)) == nil,
+          "reader rejects ordinary noncollapsed selection")
 }
 
 private func checkFocusRecoveryEpisode() {

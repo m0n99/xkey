@@ -14,6 +14,209 @@ private final class BackspaceProofHandler: KeyboardEventHandler {
 }
 
 final class BackspaceProofSchedulingTests: XCTestCase {
+    func testTransientGeometryRearmsAndValidatesFreshNativeProof() throws {
+        let handler = BackspaceProofHandler()
+        let source = try source(handler)
+        defer { source.stopBackspaceProofForTesting() }
+        let applied = expectation(description: "fresh native proof")
+        var reads = 0
+        source.axPassReadForTesting = { generation, revision, native in
+            XCTAssertTrue(native)
+            reads += 1
+            return (self.snapshot(generation), reads == 1 ? nil :
+                self.proofReport("", revision: revision!, atStart: true, empty: true))
+        }
+        source.axPassDiagnosticForTesting = { _, _, _ in "caretNotAtWordEnd location=1" }
+        handler.onProof = { native, outcome in
+            XCTAssertTrue(native)
+            XCTAssertEqual(outcome, .validated)
+            applied.fulfill()
+        }
+        _ = handler.engine.processBackspace()
+        handler.onNativeBackspacePassedThrough?()
+        source.settleBackspaceProofForTesting()
+        wait(for: [applied], timeout: 5)
+        XCTAssertEqual(reads, 2)
+        XCTAssertFalse(handler.engine.needsBackspaceContextProof)
+    }
+
+    func testPermanentGeometryFailureStopsAfterThreeNativeReads() throws {
+        let handler = BackspaceProofHandler()
+        let source = try source(handler)
+        defer { source.stopBackspaceProofForTesting() }
+        let completed = expectation(description: "third failure")
+        var reads = 0
+        var armed = 0
+        source.axPassReadForTesting = { generation, _, _ in
+            reads += 1
+            return (self.snapshot(generation), nil)
+        }
+        source.axPassDiagnosticForTesting = { _, _, _ in "selectionChanged location=0" }
+        source.onLogEvent = { message in
+            if message.hasPrefix("Native Backspace proof retry armed:") { armed += 1 }
+            if message.hasPrefix("Caret recovery read:") && reads == 3 {
+                DispatchQueue.main.async { completed.fulfill() }
+            }
+        }
+        _ = handler.engine.processBackspace()
+        handler.onNativeBackspacePassedThrough?()
+        source.settleBackspaceProofForTesting()
+        wait(for: [completed], timeout: 5)
+        XCTAssertEqual(reads, 3)
+        XCTAssertEqual(armed, 2)
+        XCTAssertFalse(source.hasPendingBackspaceProofForTesting)
+        XCTAssertTrue(handler.engine.needsBackspaceContextProof)
+    }
+
+    func testNewNativeDeleteResetsPendingRetryBudget() throws {
+        let handler = BackspaceProofHandler()
+        let source = try source(handler)
+        defer { source.stopBackspaceProofForTesting() }
+        let first = expectation(description: "first retry armed")
+        let second = expectation(description: "second retry armed")
+        let reset = expectation(description: "new delete restarted retry budget")
+        var armed = 0
+        source.axPassReadForTesting = { generation, _, _ in (self.snapshot(generation), nil) }
+        source.axPassDiagnosticForTesting = { _, _, _ in "invalidBounds location=3" }
+        source.onLogEvent = { message in
+            if message.hasPrefix("Native Backspace proof retry armed:") {
+                armed += 1
+                if armed == 1 { first.fulfill() }
+                if armed == 2 { second.fulfill() }
+                if armed == 3 { reset.fulfill() }
+            }
+        }
+        _ = handler.engine.processBackspace()
+        handler.onNativeBackspacePassedThrough?()
+        source.settleBackspaceProofForTesting()
+        wait(for: [first, second], timeout: 5, enforceOrder: true)
+        _ = handler.engine.processBackspace()
+        handler.onNativeBackspacePassedThrough?()
+        handler.onNativeBackspacePassedThrough?()
+        source.settleBackspaceProofForTesting()
+        wait(for: [reset], timeout: 5)
+        XCTAssertEqual(armed, 3)
+    }
+
+    func testNilGeometryDuringReadCannotRetryChangedContext() throws {
+        for change in ["typing", "focus", "identity", "host", "stop", "registry", "desync"] {
+            let handler = BackspaceProofHandler()
+            var active = true
+            var identity: (pid: pid_t?, bundleId: String?) = (42, "app")
+            let source = TapEventSource(handler: handler, isActiveHost: { active })
+            source.startBackspaceProofForTesting(pid: 42, bundleId: "app")
+            source.backspaceProofIdentityForTesting = { (identity.pid, identity.bundleId) }
+            source.recoveryIdentityForTesting = { identity }
+            source.recoveryEligibilityForTesting = { true }
+            defer { source.stopBackspaceProofForTesting() }
+            let entered = expectation(description: "read entered \(change)")
+            let finished = expectation(description: "read returned \(change)")
+            let release = DispatchSemaphore(value: 0)
+            defer { release.signal() }
+            source.axPassReadForTesting = { generation, _, _ in
+                entered.fulfill()
+                _ = release.wait(timeout: .now() + 5)
+                return (self.snapshot(generation), nil)
+            }
+            source.axPassDiagnosticForTesting = { _, _, _ in "caretNotAtWordEnd" }
+            source.onLogEvent = { message in
+                if message.hasPrefix("Caret recovery read:") { DispatchQueue.main.async { finished.fulfill() } }
+            }
+            _ = handler.engine.processBackspace()
+            handler.onNativeBackspacePassedThrough?()
+            source.settleBackspaceProofForTesting()
+            wait(for: [entered], timeout: 5)
+            switch change {
+            case "typing": type("a", handler: handler)
+            case "focus":
+                source.focusElapsedForTesting = { 0 }
+                source.recoveryEligibilityForTesting = { false }
+                source.handleAXFocusChanged(AXUIElementCreateSystemWide())
+            case "identity": identity.pid = 43
+            case "host": active = false
+            case "stop": source.stopBackspaceProofForTesting()
+            case "registry": source.handleBrowserRegistryReload()
+            default: handler.engine.bufferDesyncDetected = true
+            }
+            release.signal()
+            wait(for: [finished], timeout: 5)
+            XCTAssertFalse(source.hasPendingBackspaceProofForTesting, "\(change) must not retry a nil stale read")
+        }
+    }
+
+    func testTypingDuringRetrySettleUsesFreshOwnedRevision() throws {
+        let handler = BackspaceProofHandler()
+        let source = try source(handler)
+        defer { source.stopBackspaceProofForTesting() }
+        let armed = expectation(description: "retry armed")
+        let applied = expectation(description: "owned retry validates")
+        var reads = 0
+        source.axPassReadForTesting = { generation, revision, _ in
+            reads += 1
+            return (self.snapshot(generation), reads == 1 ? nil : self.proofReport("abc", revision: revision!))
+        }
+        source.axPassDiagnosticForTesting = { _, _, _ in "caretNotAtWordEnd" }
+        source.onLogEvent = { message in
+            if message.hasPrefix("Native Backspace proof retry armed:") { armed.fulfill() }
+        }
+        handler.onProof = { native, outcome in
+            XCTAssertTrue(native)
+            XCTAssertEqual(outcome, .validated)
+            applied.fulfill()
+        }
+        _ = handler.engine.processBackspace()
+        handler.onNativeBackspacePassedThrough?()
+        source.settleBackspaceProofForTesting()
+        wait(for: [armed], timeout: 5)
+        type("abc", handler: handler)
+        let raw = handler.engine.buffer.getKeystrokeSequence()
+        source.settleBackspaceProofForTesting()
+        wait(for: [applied], timeout: 5)
+        XCTAssertEqual(reads, 2)
+        XCTAssertEqual(handler.engine.buffer.getKeystrokeSequence(), raw)
+    }
+
+    func testNewDeleteWhileReadInFlightOwnsTheNextProof() throws {
+        let handler = BackspaceProofHandler()
+        let source = try source(handler)
+        defer { source.stopBackspaceProofForTesting() }
+        let entered = expectation(description: "first delete read entered")
+        let applied = expectation(description: "new delete proof applied")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        var reads = 0
+        var retryArms = 0
+        source.axPassReadForTesting = { generation, revision, _ in
+            reads += 1
+            if reads == 1 {
+                entered.fulfill()
+                _ = release.wait(timeout: .now() + 5)
+                return (self.snapshot(generation), nil)
+            }
+            return (self.snapshot(generation), self.proofReport("", revision: revision!, atStart: true, empty: true))
+        }
+        source.axPassDiagnosticForTesting = { _, _, _ in "invalidSelection location=-1" }
+        source.onLogEvent = { message in
+            if message.hasPrefix("Native Backspace proof retry armed:") { retryArms += 1 }
+        }
+        handler.onProof = { native, outcome in
+            XCTAssertTrue(native)
+            XCTAssertEqual(outcome, .validated)
+            applied.fulfill()
+        }
+        _ = handler.engine.processBackspace()
+        handler.onNativeBackspacePassedThrough?()
+        source.settleBackspaceProofForTesting()
+        wait(for: [entered], timeout: 5)
+        _ = handler.engine.processBackspace()
+        handler.onNativeBackspacePassedThrough?()
+        source.settleBackspaceProofForTesting()
+        release.signal()
+        wait(for: [applied], timeout: 5)
+        XCTAssertEqual(reads, 2)
+        XCTAssertEqual(retryArms, 0)
+    }
+
     private func snapshot(_ generation: UInt64) -> TapEventSource.AXSnapshot {
         TapEventSource.AXSnapshot(generation: generation, focusedInfo: .empty,
                                   hasFocusedElement: false, overlayName: nil)
@@ -54,12 +257,14 @@ final class BackspaceProofSchedulingTests: XCTestCase {
         let newRevision = handler.typingRevision
         XCTAssertGreaterThan(newRevision, oldRevision)
         let applied = expectation(description: "native proof applied")
+        var reads = 0
         handler.onProof = { native, outcome in
             XCTAssertTrue(native)
             XCTAssertEqual(outcome, .validated)
             applied.fulfill()
         }
         source.axPassReadForTesting = { generation, revision, native in
+            reads += 1
             XCTAssertFalse(Thread.isMainThread)
             XCTAssertTrue(native)
             XCTAssertEqual(revision, newRevision)
@@ -67,6 +272,7 @@ final class BackspaceProofSchedulingTests: XCTestCase {
         }
         source.settleBackspaceProofForTesting()
         wait(for: [applied], timeout: 5)
+        XCTAssertEqual(reads, 1, "successful first proof must not retry")
         XCTAssertFalse(handler.engine.needsBackspaceContextProof)
         XCTAssertFalse(handler.engine.cursorMovedSinceReset)
     }

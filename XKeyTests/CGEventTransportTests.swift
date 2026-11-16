@@ -126,6 +126,79 @@ final class CGEventTransportTests: XCTestCase {
         XCTAssertTrue(handler.engine.selectionProofActive)
     }
 
+    func testGuardedOwnedWordStartFiresOnceAfterRealLetterHandling() throws {
+        for flags: CGEventFlags in [[], .maskShift, .maskAlphaShift] {
+            let sink = RecordingSink()
+            let handler = KeyboardEventHandler(transport: CGEventTransport(sink: sink))
+            handler.engine.vCheckSpelling = 0
+            handler.engine.cursorMovedSinceReset = true
+            let proxy = unsafeBitCast(UInt(1), to: CGEventTapProxy.self)
+            var observedWords: [String] = []
+            handler.onGuardedOwnedWordStart = { [weak handler] in
+                if let handler = handler { observedWords.append(handler.engine.getCurrentWord()) }
+            }
+            let first = try makeEvent(keyCode: VietnameseData.KEY_C, characters: flags.isEmpty ? "c" : "C")
+            first.flags = flags
+            _ = handler.processKeyEvent(first, type: .keyDown, proxy: proxy)
+            let continuation = try makeEvent(keyCode: VietnameseData.KEY_A, characters: "a")
+            _ = handler.processKeyEvent(continuation, type: .keyDown, proxy: proxy)
+            XCTAssertEqual(observedWords.count, 1)
+            XCTAssertEqual(observedWords.first?.lowercased(), "c", "callback observes the newly owned word")
+        }
+    }
+
+    func testOwnedWordStartExcludesUnguardedAndNonLetterEvents() throws {
+        let cases: [(UInt16, String, CGEventFlags, Bool)] = [
+            (VietnameseData.KEY_C, "c", [], false),
+            (VietnameseData.KEY_C, "c", .maskCommand, true),
+            (VietnameseData.KEY_C, "c", .maskControl, true),
+            (VietnameseData.KEY_C, "c", .maskAlternate, true),
+            (VietnameseData.KEY_C, "c", .maskSecondaryFn, true),
+            (VietnameseData.KEY_COMMA, ",", [], true),
+            (VietnameseData.KEY_1, "1", [], true),
+            (VietnameseData.KEY_SPACE, " ", [], true),
+            (VietnameseData.KEY_DELETE, "\u{7f}", [], true)
+        ]
+        let proxy = unsafeBitCast(UInt(1), to: CGEventTapProxy.self)
+        for (keyCode, characters, flags, guarded) in cases {
+            let sink = RecordingSink()
+            let handler = KeyboardEventHandler(transport: CGEventTransport(sink: sink))
+            handler.engine.vCheckSpelling = 0
+            handler.engine.cursorMovedSinceReset = guarded
+            var callbacks = 0
+            handler.onGuardedOwnedWordStart = { callbacks += 1 }
+            let event = try makeEvent(keyCode: keyCode, characters: characters)
+            event.flags = flags
+            _ = handler.processKeyEvent(event, type: .keyDown, proxy: proxy)
+            XCTAssertEqual(callbacks, 0, "unexpected callback for keyCode=\(keyCode), flags=\(flags)")
+        }
+    }
+
+    func testOwnedWordStartDoesNotFireForExistingSelectedSuffixProof() throws {
+        let sink = RecordingSink()
+        let handler = KeyboardEventHandler(transport: CGEventTransport(sink: sink))
+        handler.engine.vCheckSpelling = 0
+        let proxy = unsafeBitCast(UInt(1), to: CGEventTapProxy.self)
+        let initial = try makeEvent(keyCode: VietnameseData.KEY_O, characters: "o")
+        _ = handler.processKeyEvent(initial, type: .keyDown, proxy: proxy)
+        handler.engine.focusChangedDuringTyping = true
+        var proof = CaretWordReport(word: "o", caretAtWordEnd: true, selectionAnchoredAtCaret: false,
+                                    selectionLength: 3, elementSignature: "field", appBundleId: nil,
+                                    expectedRevision: handler.engine.typingRevision)
+        proof.proofKind = .selectedSuffixReplacement(selectionLength: 3)
+        XCTAssertEqual(handler.engine.recoverCaretWord(proof), .validated)
+        XCTAssertTrue(handler.engine.selectionProofActive)
+        let info = InjectionMethodInfo(method: .fast, delays: (0, 0, 0), textSendingMethod: .chunked,
+                                       description: "event snapshot", needsEmptyCharPrefix: true)
+        sink.capturedProfile = try XCTUnwrap(SelectedSuffixInjectionProfile(methodInfo: info))
+        handler.engine.cursorMovedSinceReset = true
+        var callbacks = 0
+        handler.onGuardedOwnedWordStart = { callbacks += 1 }
+        let next = try makeEvent(keyCode: VietnameseData.KEY_C, characters: "c")
+        _ = handler.processKeyEvent(next, type: .keyDown, proxy: proxy)
+        XCTAssertEqual(callbacks, 0)
+    }
+
     func testReturnReplacementInjectsBeforeStartingNewSession() throws {
         let sink = RecordingSink()
         let transport = CGEventTransport(sink: sink)

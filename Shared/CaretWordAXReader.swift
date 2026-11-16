@@ -45,6 +45,12 @@ struct CaretRecoveryFreshness: Equatable {
     let isRunning: Bool
     let isActiveHost: Bool
 
+    static func shouldRequestOwnedWordStart(guardedBefore: Bool, wasEmpty: Bool, isEmpty: Bool,
+                                            ordinaryLetter: Bool, selectionProof: Bool,
+                                            desynced: Bool, overflow: Bool) -> Bool {
+        guardedBefore && wasEmpty && !isEmpty && ordinaryLetter && !selectionProof && !desynced && !overflow
+    }
+
     static func canTransferRecovery(old: CaretRecoveryFreshness, current: CaretRecoveryFreshness,
                                     pendingEpoch: UInt64, oldPID: pid_t?, pendingPID: pid_t?,
                                     currentPID: pid_t?, oldBundle: String?, pendingBundle: String?,
@@ -103,6 +109,21 @@ struct CaretRecoveryFreshness: Equatable {
 
 /// The provider is confined to the AX queue; it never reads application state.
 struct CaretWordAXReader {
+    static func canRetryNativeGeometry(_ diagnostic: String?, retryCount: Int) -> Bool {
+        guard retryCount >= 0, retryCount < 2, let token = diagnostic?.split(separator: " ").first else { return false }
+        return ["caretNotAtWordEnd", "selectionChanged", "invalidSelection", "invalidBounds",
+                "textLengthMismatch", "nonCollapsedSelection"].contains(String(token))
+    }
+
+    private static func scalarClass(_ text: String) -> String {
+        guard let scalar = text.unicodeScalars.first else { return "empty" }
+        if CharacterSet.letters.contains(scalar) { return "letter" }
+        if CharacterSet.decimalDigits.contains(scalar) { return "digit" }
+        if CharacterSet.whitespacesAndNewlines.contains(scalar) { return "space" }
+        if CharacterSet.nonBaseCharacters.contains(scalar) { return "mark" }
+        return "other"
+    }
+
     struct OmniboxMetadata {
         let role: String?
         let description: String?
@@ -168,7 +189,10 @@ struct CaretWordAXReader {
         else {
             return fail("parserOrBoundaryFailure")
         }
-        guard parsed.caretAtWordEnd else { return fail("caretNotAtWordEnd") }
+        guard parsed.caretAtWordEnd else {
+            return fail("caretNotAtWordEnd location=\(selection.location) selectionLength=\(selection.length) " +
+                        "fieldLength=\(length) rightLength=\(rightLength) rightClass=\(scalarClass(right))")
+        }
         guard let finalSelection = provider.selection() else { return fail("finalSelectionUnavailable") }
         guard finalSelection.location == selection.location, finalSelection.length == selection.length else {
             return fail("selectionChanged location=\(finalSelection.location) length=\(finalSelection.length)")

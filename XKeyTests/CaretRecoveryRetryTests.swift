@@ -20,6 +20,101 @@ private final class CaretChromeDetector: AppBehaviorDetector {
 }
 
 final class CaretRecoveryRetryTests: XCTestCase {
+    func testOwnedWordStartQueuesFreshGenericProof() {
+        for nativeHistory in [false, true] {
+            let handler = CaretRetryHandler()
+            let source = retrySource(handler)
+            source.startBackspaceProofForTesting(pid: 42, bundleId: "app")
+            defer { source.stopBackspaceProofForTesting() }
+            if nativeHistory { _ = handler.engine.processBackspace() }
+            else { handler.engine.cursorMovedSinceReset = true }
+            type("c", handler: handler)
+            let applied = expectation(description: "owned word validated")
+            let started = DispatchTime.now().uptimeNanoseconds
+            var reads = 0
+            source.axPassReadForTesting = { generation, revision, native in
+                reads += 1
+                XCTAssertFalse(native)
+                XCTAssertGreaterThanOrEqual(DispatchTime.now().uptimeNanoseconds - started, 50_000_000,
+                                            "the target must get the native-edit settle window before AX is read")
+                return (self.snapshot(generation), self.proofReport("c", revision: revision!))
+            }
+            handler.onProof = { native, outcome in
+                XCTAssertFalse(native)
+                XCTAssertEqual(outcome, .validated)
+                applied.fulfill()
+            }
+            handler.onGuardedOwnedWordStart?()
+            wait(for: [applied], timeout: 5)
+            XCTAssertEqual(reads, 1)
+            XCTAssertFalse(handler.engine.cursorMovedSinceReset)
+        }
+    }
+
+    func testQueuedOwnedWordDemandWaitsForNativeProofOrStaleRead() {
+        for nativeSucceeds in [true, false] {
+            let handler = CaretRetryHandler()
+            let source = retrySource(handler)
+            source.startBackspaceProofForTesting(pid: 42, bundleId: "app")
+            source.backspaceProofIdentityForTesting = { (42, "app") }
+            defer { source.stopBackspaceProofForTesting() }
+            _ = handler.engine.processBackspace()
+            handler.onNativeBackspacePassedThrough?()
+            let applied = expectation(description: "native priority or generic fallback")
+            let entered = nativeSucceeds ? nil : expectation(description: "native read entered")
+            let callbackQueued = expectation(description: "demand observed")
+            let release = DispatchSemaphore(value: 0)
+            defer { release.signal() }
+            var nativeReads = 0
+            var genericReads = 0
+            source.axPassReadForTesting = { generation, revision, native in
+                if native {
+                    nativeReads += 1
+                    if !nativeSucceeds {
+                        entered?.fulfill()
+                        _ = release.wait(timeout: .now() + 5)
+                        return (self.snapshot(generation), nil)
+                    }
+                } else { genericReads += 1 }
+                return (self.snapshot(generation), self.proofReport("c", revision: revision!))
+            }
+            handler.onProof = { native, outcome in
+                XCTAssertEqual(native, nativeSucceeds)
+                XCTAssertEqual(outcome, .validated)
+                applied.fulfill()
+            }
+            if !nativeSucceeds {
+                source.settleBackspaceProofForTesting()
+                wait(for: [entered!], timeout: 5)
+            }
+            type("c", handler: handler)
+            handler.onGuardedOwnedWordStart?()
+            DispatchQueue.main.async { callbackQueued.fulfill() }
+            wait(for: [callbackQueued], timeout: 5)
+            if nativeSucceeds { source.settleBackspaceProofForTesting() }
+            else { release.signal() }
+            wait(for: [applied], timeout: 5)
+            XCTAssertEqual(nativeReads, 1)
+            XCTAssertEqual(genericReads, nativeSucceeds ? 0 : 1)
+        }
+    }
+
+    func testStoppedSourceDiscardsQueuedOwnedWordDemand() {
+        let handler = CaretRetryHandler()
+        let source = retrySource(handler)
+        source.startBackspaceProofForTesting(pid: 42, bundleId: "app")
+        handler.engine.cursorMovedSinceReset = true
+        type("c", handler: handler)
+        var schedules = 0
+        source.onRecoveryScheduledForTesting = { _ in schedules += 1 }
+        handler.onGuardedOwnedWordStart?()
+        source.stopBackspaceProofForTesting()
+        let drained = expectation(description: "queued callback drained")
+        DispatchQueue.main.async { drained.fulfill() }
+        wait(for: [drained], timeout: 5)
+        XCTAssertEqual(schedules, 0)
+    }
+
     func testObserverResolvesPinnedEditorAndPreservesTransportProfile() throws {
         let handler = CaretRetryHandler()
         let source = retrySource(handler)

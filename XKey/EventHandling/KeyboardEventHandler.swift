@@ -18,6 +18,7 @@ class KeyboardEventHandler: EventTapManager.EventTapDelegate {
     var typingRevision: UInt64 { engine.typingRevision }
     var needsBackspaceContextProof: Bool { engine.needsBackspaceContextProof }
     var onNativeBackspacePassedThrough: (() -> Void)?
+    var onGuardedOwnedWordStart: (() -> Void)?
     var canRecoverCaretWord: Bool {
         guard AppBehaviorDetector.shared.confirmedInjectionMethod != nil else { return false }
         return activeInputContext() == true
@@ -441,6 +442,9 @@ class KeyboardEventHandler: EventTapManager.EventTapDelegate {
         let profile = captureSelectedSuffixProfile()
         engine.selectionNormalizationAvailable = profile != nil
         defer { engine.selectionNormalizationAvailable = false }
+        let guardedBefore = engine.cursorMovedSinceReset || engine.focusChangedDuringTyping
+        let wasEmpty = engine.buffer.isEmpty
+        let hadSelectionProof = engine.selectionProofActive
         let action = session.handle(inputEvent)
         if case .passThrough = action, inputEvent.keyCode == VietnameseData.KEY_ESC,
            engine.selectionProofActive {
@@ -459,6 +463,17 @@ class KeyboardEventHandler: EventTapManager.EventTapDelegate {
            inputEvent.modifiers.isDisjoint(with: [.command, .control, .option]),
            needsBackspaceContextProof {
             onNativeBackspacePassedThrough?()
+        }
+        if guardedBefore && wasEmpty && !engine.buffer.isEmpty && !hadSelectionProof,
+           let keyCode = inputEvent.keyCode {
+            let ordinaryLetter = inputEvent.modifiers.isDisjoint(with: [.command, .control, .option, .function]) &&
+                engine.vietnameseData.isLetter(keyCode)
+            if CaretRecoveryFreshness.shouldRequestOwnedWordStart(
+                guardedBefore: guardedBefore, wasEmpty: wasEmpty, isEmpty: engine.buffer.isEmpty,
+                ordinaryLetter: ordinaryLetter, selectionProof: engine.selectionProofActive,
+                desynced: engine.bufferDesyncDetected, overflow: engine.buffer.hasOverflow) {
+                onGuardedOwnedWordStart?()
+            }
         }
         return result
     }

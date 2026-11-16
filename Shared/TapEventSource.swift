@@ -273,6 +273,7 @@ final class TapEventSource {
     var onRecoveryScheduledForTesting: ((UInt64) -> Void)?
     var onBackspaceProofScheduledForTesting: ((UInt64) -> Void)?
     var axPassReadForTesting: ((UInt64, UInt64?, Bool) -> (AXSnapshot, CaretWordReport?))?
+    var axPassDiagnosticForTesting: ((UInt64, UInt64?, Bool) -> String?)?
     var pinnedFocusReadForTesting: ((pid_t?) -> PinnedFocusRead<AXUIElement>)?
     var focusedInfoForTesting: ((AXUIElement) -> AppBehaviorDetector.FocusedElementInfo)?
     var onAXSnapshotForTesting: ((AXSnapshot) -> Void)?
@@ -287,7 +288,9 @@ final class TapEventSource {
         let pid: pid_t
         let bundleId: String?
         var ready: Bool
+        var retryCount: Int
     }
+    private static let caretProofSettleInterval: TimeInterval = 0.05
     private var backspaceProofToken: BackspaceProofToken?
     private var backspaceProofSequence: UInt64 = 0
     private var backspaceProofWorkItem: DispatchWorkItem?
@@ -329,6 +332,7 @@ final class TapEventSource {
         let appBundleId: String?
         let isBackspaceProof: Bool
         var recoveryRetryCount: Int
+        let backspaceProofSequence: UInt64?
         var recoveryDemandTransferred = false
         /// Takes the source rather than capturing it, so a queued pass never keeps a
         /// released source alive past its deinit.
@@ -604,6 +608,7 @@ final class TapEventSource {
             browserRegistryObserver = nil
         }
         handler.onNativeBackspacePassedThrough = nil
+        handler.onGuardedOwnedWordStart = nil
         cancelBackspaceProof()
         cachedProofPID = nil
         cachedProofBundleId = nil
@@ -678,6 +683,7 @@ final class TapEventSource {
         isBackspaceProof: Bool = false,
         proofAnchor: (pid: pid_t, bundleId: String?)? = nil,
         recoveryRetryCount: Int = 0,
+        backspaceProofSequence: UInt64? = nil,
         apply: @escaping (TapEventSource, AXSnapshot) -> Void
     ) {
         // Ownership is checked here and again after the hop: a pass costs AX round-trips
@@ -695,6 +701,7 @@ final class TapEventSource {
                                  appPID: proofAnchor?.pid ?? identity.pid,
                                  appBundleId: proofAnchor == nil ? identity.bundleId : proofAnchor?.bundleId,
                                  isBackspaceProof: isBackspaceProof, recoveryRetryCount: recoveryRetryCount,
+                                 backspaceProofSequence: backspaceProofSequence,
                                  apply: apply)
 
         guard !axPassInFlight else {
@@ -711,6 +718,7 @@ final class TapEventSource {
         // the frontmost app is AppKit state. Pinning it here also ties the window title
         // and the DOM-attribute gate to the app that was frontmost when the pass started.
         let readOverride = axPassReadForTesting
+        let diagnosticOverride = axPassDiagnosticForTesting
         let pinnedReadOverride = pinnedFocusReadForTesting
         let focusedInfoOverride = focusedInfoForTesting
         let appElement = readOverride == nil ? pass.appPID.map { AXUIElementCreateApplication($0) } : nil
@@ -739,7 +747,7 @@ final class TapEventSource {
                 focusedInfo = snapshot.focusedInfo
                 hasFocusedElement = snapshot.hasFocusedElement
                 recoveryReport = report
-                readerDiagnostic = nil
+                readerDiagnostic = diagnosticOverride?(pass.generation, pass.recoveryRevision, pass.isBackspaceProof)
                 probedOverlayName = nil
                 resolvedElement = snapshot.resolvedElement
             } else {
@@ -858,7 +866,7 @@ final class TapEventSource {
                 snapshot.recoveryDemandTransferred = pass.recoveryDemandTransferred
                 self.onAXSnapshotForTesting?(snapshot)
                 pass.apply(self, snapshot)
-                self.applyRecoveryResult(pass, report: recoveryReport)
+                self.applyRecoveryResult(pass, report: recoveryReport, diagnostic: readerDiagnostic)
             }
         }
     }
@@ -887,7 +895,7 @@ final class TapEventSource {
         pendingAXPass = pending
     }
 
-    private func applyRecoveryResult(_ pass: PendingAXPass, report: CaretWordReport?) {
+    private func applyRecoveryResult(_ pass: PendingAXPass, report: CaretWordReport?, diagnostic: String?) {
         let expected = CaretRecoveryFreshness(revision: pass.recoveryRevision ?? 0,
                                               epoch: pass.recoveryEpoch, generation: pass.generation,
                                               isRunning: true, isActiveHost: true)
@@ -910,6 +918,20 @@ final class TapEventSource {
         }
         if verdict == .staleRevision {
             retryStaleCaretRecovery(pass, current: current)
+        } else if verdict == .missingReport, pass.isBackspaceProof,
+                  let pid = pass.appPID, pass.recoveryRevision != nil,
+                  expected.matches(current), identity.pid == pid, identity.bundleId == pass.appBundleId,
+                  cachedProofPID == pid, cachedProofBundleId == pass.appBundleId,
+                  pass.backspaceProofSequence == backspaceProofSequence, backspaceProofToken == nil,
+                  !handler.engine.bufferDesyncDetected, handler.needsBackspaceContextProof,
+                  CaretWordAXReader.canRetryNativeGeometry(diagnostic, retryCount: pass.recoveryRetryCount) {
+            backspaceProofSequence &+= 1
+            let id = backspaceProofSequence
+            backspaceProofToken = BackspaceProofToken(id: id, epoch: pass.recoveryEpoch, pid: pid,
+                bundleId: pass.appBundleId, ready: false, retryCount: pass.recoveryRetryCount + 1)
+            backspaceProofDeadline = .now() + Self.caretProofSettleInterval
+            scheduleBackspaceSettle(id: id, deadline: backspaceProofDeadline)
+            onLogEvent?("Native Backspace proof retry armed: attempt=\(pass.recoveryRetryCount + 1)/2")
         }
     }
 
@@ -1003,6 +1025,25 @@ final class TapEventSource {
         handler.onNativeBackspacePassedThrough = { [weak self] in
             self?.enqueueBackspaceProof()
         }
+        handler.onGuardedOwnedWordStart = { [weak self] in
+            guard let self = self, self.isRunning, let pid = self.cachedProofPID else { return }
+            let epoch = self.recoveryEpoch
+            let bundleId = self.cachedProofBundleId
+            // Yielding the tap does not guarantee the target has processed the native key.
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.caretProofSettleInterval) { [weak self] in
+                guard let self = self, self.isRunning, self.isActiveHost(),
+                      self.recoveryEpoch == epoch, self.cachedProofPID == pid,
+                      self.cachedProofBundleId == bundleId else { return }
+                let identity = self.currentRecoveryIdentity()
+                guard identity.pid == pid, identity.bundleId == bundleId else { return }
+                let engine = self.handler.engine
+                guard !engine.buffer.isEmpty, !engine.buffer.hasOverflow, !engine.bufferDesyncDetected,
+                      !engine.selectionProofActive,
+                      engine.cursorMovedSinceReset || engine.focusChangedDuringTyping else { return }
+                self.noteFocusRecoveryDemand()
+                self.drainFocusRecoveryDemand()
+            }
+        }
     }
 
     private func logBackspaceProofLater(_ message: String) {
@@ -1029,11 +1070,12 @@ final class TapEventSource {
         if backspaceProofToken == nil {
             backspaceProofSequence &+= 1
             backspaceProofToken = BackspaceProofToken(id: backspaceProofSequence, epoch: recoveryEpoch,
-                                                      pid: pid, bundleId: cachedProofBundleId, ready: false)
+                                                      pid: pid, bundleId: cachedProofBundleId, ready: false, retryCount: 0)
             logBackspaceProofLater("Native Backspace proof enqueued")
         }
         backspaceProofToken?.ready = false
-        backspaceProofDeadline = .now() + 0.05
+        backspaceProofToken?.retryCount = 0
+        backspaceProofDeadline = .now() + Self.caretProofSettleInterval
         if backspaceProofWorkItem == nil, let id = backspaceProofToken?.id {
             scheduleBackspaceSettle(id: id, deadline: backspaceProofDeadline)
         }
@@ -1060,6 +1102,7 @@ final class TapEventSource {
     }
 
     private func cancelBackspaceProof() {
+        backspaceProofSequence &+= 1
         backspaceProofWorkItem?.cancel()
         backspaceProofWorkItem = nil
         backspaceProofToken = nil
@@ -1080,14 +1123,15 @@ final class TapEventSource {
             onLogEvent?("Native Backspace proof skipped: stale identity or owner")
             return
         }
-        guard handler.needsBackspaceContextProof,
+        guard !handler.engine.bufferDesyncDetected, handler.needsBackspaceContextProof,
               recoveryEligibilityForTesting?() ?? handler.canRecoverCaretWord else {
             onLogEvent?("Native Backspace proof skipped: ineligible context")
             return
         }
         let revision = handler.typingRevision
         scheduleAXPass(element: nil, recoveryRevision: revision, isBackspaceProof: true,
-                       proofAnchor: (token.pid, token.bundleId)) { _, _ in }
+                       proofAnchor: (token.pid, token.bundleId), recoveryRetryCount: token.retryCount,
+                       backspaceProofSequence: backspaceProofSequence) { _, _ in }
         onLogEvent?("Native Backspace proof scheduled: revision=\(revision) epoch=\(token.epoch)")
         onBackspaceProofScheduledForTesting?(revision)
     }
@@ -1111,6 +1155,7 @@ final class TapEventSource {
         isRunning = false
         clearFocusRecovery()
         handler.onNativeBackspacePassedThrough = nil
+        handler.onGuardedOwnedWordStart = nil
         cancelBackspaceProof()
         cachedProofPID = nil
         cachedProofBundleId = nil

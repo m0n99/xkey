@@ -166,6 +166,45 @@ func backspaceReaderMetadataScenarios() {
     }
 }
 
+func backspaceGeometryRetryScenarios() {
+    for token in ["caretNotAtWordEnd", "selectionChanged", "invalidSelection", "invalidBounds",
+                  "textLengthMismatch", "nonCollapsedSelection"] {
+        check(CaretWordAXReader.canRetryNativeGeometry(token + " location=1", retryCount: 0), "allowed geometry token")
+        check(CaretWordAXReader.canRetryNativeGeometry(token, retryCount: 1), "second geometry retry allowed")
+        check(!CaretWordAXReader.canRetryNativeGeometry(token, retryCount: 2), "third geometry retry forbidden")
+        check(!CaretWordAXReader.canRetryNativeGeometry(token + "Extra", retryCount: 0), "token suffix rejected")
+    }
+    for token in ["textUnavailable", "selectionUnavailable", "secureField", "notEditable", "focusChanged", ""] {
+        check(!CaretWordAXReader.canRetryNativeGeometry(token, retryCount: 0), "permanent failure not retried")
+    }
+    let engine = makeEngine()
+    exhaustEmptyHistory(engine)
+    var diagnostic = ""
+    var reads = 0
+    let stale = readContext("secret", selection: CFRange(location: 1, length: 0), role: "AXTextArea",
+                            ranges: { _ in reads += 1 }, diagnostic: { diagnostic = $0 })
+    check(stale == nil && diagnostic == "caretNotAtWordEnd location=1 selectionLength=0 fieldLength=6 rightLength=5 rightClass=letter",
+          "midword diagnostic contains only numeric geometry and scalar class")
+    check(reads == 2 && !diagnostic.contains("secret"), "diagnostic adds no text reads or raw content")
+    check(readContext("abc", selection: CFRange(location: 1, length: 1), role: "AXTextArea") == nil,
+          "native retry reader rejects selected text")
+    check(readContext("abc", selection: CFRange(location: 3, length: 0), role: "AXTextArea",
+                      subrole: "AXSecureTextField") == nil, "native retry reader rejects secure field")
+    let empty = readContext("", selection: CFRange(location: 0, length: 0), role: "AXTextArea")!
+    let proof = CaretWordReport(word: empty.word, caretAtWordEnd: empty.caretAtWordEnd,
+                            selectionAnchoredAtCaret: empty.selectionAnchoredAtCaret, selectionLength: empty.selectionLength,
+                            elementSignature: empty.elementSignature, appBundleId: empty.appBundleId,
+                            expectedRevision: engine.typingRevision, caretAtFieldStart: true, fieldIsEmpty: true)
+    check(engine.recoverCaretWord(proof, nativeBackspaceProof: true) == .validated, "fresh empty retry validates")
+    let owned = makeEngine()
+    exhaustEmptyHistory(owned)
+    var screen = ""
+    for key in "abc" { press(key, engine: owned, screen: &screen) }
+    let raw = owned.buffer.getKeystrokeSequence()
+    check(owned.recoverCaretWord(report(screen, owned), nativeBackspaceProof: true) == .validated &&
+          owned.buffer.getKeystrokeSequence() == raw, "fresh owned retry validates without changing raw keys")
+}
+
 func runBackspaceContextScenarios() {
     backspaceProducerScenarios()
     backspaceBoundaryScenarios()
@@ -173,4 +212,5 @@ func runBackspaceContextScenarios() {
     backspaceUnownedScenarios()
     backspaceHardDesyncScenarios()
     backspaceReaderMetadataScenarios()
+    backspaceGeometryRetryScenarios()
 }
