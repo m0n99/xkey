@@ -321,6 +321,7 @@ final class TapController {
         switch bundleIdentifier {
         case "com.apple.Spotlight": return "Spotlight"
         case "com.raycast.macos": return "Raycast"
+        case "com.abueammar.tinycast": return "Tinycast"
         case "com.runningwithcrayons.Alfred", "com.runningwithcrayons.Alfred-3": return "Alfred"
         default: return nil
         }

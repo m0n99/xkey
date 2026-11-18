@@ -167,6 +167,7 @@ class XKeyIMController: IMKInputController {
     private static let overlayAppBundleIds: Set<String> = [
         "com.apple.Spotlight",
         "com.raycast.macos",
+        "com.abueammar.tinycast",
         "com.runningwithcrayons.Alfred",
         "com.runningwithcrayons.Alfred-3",
     ]

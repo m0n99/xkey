@@ -167,6 +167,7 @@ class OverlayAppDetector {
         case "Spotlight": return "com.apple.Spotlight"
         case "Raycast": return "com.raycast.macos"
         case "Alfred": return "com.runningwithcrayons.Alfred"
+        case "Tinycast": return "com.abueammar.tinycast"
         default: return nil
         }
     }
@@ -410,7 +411,18 @@ class OverlayAppDetector {
             }
         }
 
-        return nil
+        return Self.focusedOwnerOverlayName(for: axElement) { element in
+            var pid: pid_t = 0
+            guard AXUIElementGetPid(element, &pid) == .success else { return nil }
+            return NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+        }
+    }
+
+    static func focusedOwnerOverlayName(for element: AXUIElement?,
+                                        bundleIdentifier: (AXUIElement) -> String?) -> String? {
+        guard let element = element,
+              bundleIdentifier(element) == bundleId(forOverlayName: "Tinycast") else { return nil }
+        return "Tinycast"
     }
 
 

@@ -677,17 +677,7 @@ class DebugViewModel: ObservableObject {
         // This is more accurate since overlay apps don't become frontmost application
         if let overlayName = OverlayAppDetector.shared.getVisibleOverlayAppName() {
             // Map overlay name to bundle ID for display
-            let overlayBundleID: String
-            switch overlayName {
-            case "Spotlight":
-                overlayBundleID = "com.apple.Spotlight"
-            case "Raycast":
-                overlayBundleID = "com.raycast.macos"
-            case "Alfred":
-                overlayBundleID = "com.runningwithcrayons.Alfred"
-            default:
-                overlayBundleID = "unknown.overlay"
-            }
+            let overlayBundleID = OverlayAppDetector.bundleId(forOverlayName: overlayName) ?? "unknown.overlay"
             
             detectedAppName = overlayName
             detectedAppBundleID = overlayBundleID
@@ -800,6 +790,7 @@ class DebugViewModel: ObservableObject {
         let launcherBundleIDs = [
             "com.apple.Spotlight",
             "com.raycast.macos",
+            "com.abueammar.tinycast",
             "com.runningwithcrayons.Alfred",
             "com.runningwithcrayons.Alfred-3",
             "at.obdev.LaunchBar",

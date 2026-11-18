@@ -2436,7 +2436,7 @@ class AppBehaviorDetector {
         if let overlayName = overlayAppNameProvider?() {
             if overlayName == "Spotlight" {
                 return .spotlight
-            } else if overlayName == "Raycast" || overlayName == "Alfred" {
+            } else if overlayName == "Raycast" || overlayName == "Alfred" || overlayName == "Tinycast" {
                 return .overlayLauncher
             }
             // Unknown overlay name: fall through to bundle ID check below
@@ -2448,7 +2448,7 @@ class AppBehaviorDetector {
         }
         
         // Raycast
-        if bundleId == "com.raycast.macos" {
+        if bundleId == "com.raycast.macos" || bundleId == "com.abueammar.tinycast" {
             return .overlayLauncher
         }
         

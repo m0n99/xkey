@@ -1,7 +1,38 @@
 import XCTest
+import ApplicationServices
 @testable import XKey
 
 final class AppPolicyRuntimeTests: XCTestCase {
+    func testTinycastRequiresFocusedElementOwner() {
+        let element = AXUIElementCreateSystemWide()
+        var ownerRead = false
+        XCTAssertNil(OverlayAppDetector.focusedOwnerOverlayName(for: nil) { _ in
+            ownerRead = true
+            return "com.abueammar.tinycast"
+        })
+        XCTAssertFalse(ownerRead)
+        XCTAssertEqual(OverlayAppDetector.focusedOwnerOverlayName(for: element) { _ in
+            "com.abueammar.tinycast"
+        }, "Tinycast")
+        XCTAssertNil(OverlayAppDetector.focusedOwnerOverlayName(for: element) { _ in
+            "com.example.Other"
+        })
+        XCTAssertNil(OverlayAppDetector.focusedOwnerOverlayName(for: element) { _ in nil })
+    }
+
+    func testTinycastOverlayUsesOwnPolicy() {
+        var preferences = Preferences()
+        preferences.smartSwitchEnabled = true
+        preferences.excludedApps = [ExcludedApp(bundleIdentifier: "com.example.Blocked", appName: "Blocked")]
+        let store = FakeSmartSwitchStore(languages: ["com.abueammar.tinycast": true])
+
+        XCTAssertEqual(makeRuntime(store: store).evaluate(
+            context: AppContext(bundleIdentifier: "com.example.Blocked", windowTitle: nil, overlayName: "Tinycast"),
+            currentVietnameseEnabled: false,
+            preferences: snapshot(preferences)
+        ), .restoreVietnamese(true))
+    }
+
     func testWindowTitleRulesHotkeyAppliesCachedTitlePolicyBeforeAsyncRefresh() {
         let rule = WindowTitleRule(
             name: "English terminal",
